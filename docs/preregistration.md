@@ -8,12 +8,12 @@
 
 | Item | Where |
 |---|---|
-| Datasets, sources, commits, file SHA-256, label verbalizations | `configs/datasets.yaml`, `data/manifest.json` |
-| Models, OpenRouter providers and quantizations, HF tokenizer revisions | `configs/models.yaml`, `configs/endpoints.lock.json` |
-| Retrieval stacks, model revisions, RRF k=60, rerank depth 200, reranker instruction | `configs/retrieval.yaml`, `data/rankings/manifest.json` |
-| Study definitions, k grid, LOO query count, pool sizes | `configs/studies.yaml` |
-| Prompt formats P0-P3, parsers, scorer | `src/trice/prompt/`, `src/trice/eval/metrics.py` |
-| Seeds | derived only via `trice.seeds.derive_seed(purpose, ...)` |
+| Datasets, sources, commits, file SHA-256, label verbalizations | `trice.toml` `[sources]`, `[datasets]` |
+| Models, OpenRouter providers and quantizations, HF tokenizer revisions | `trice.toml` `[models]`, `results/endpoints.json` |
+| Retrieval stacks, model revisions, RRF k=60, rerank depth 200, reranker instruction | `trice.toml` `[retrieval]` |
+| Study definitions, k grid, LOO query count, pool sizes | `trice.toml` `[studies]`, `[selection]` |
+| Prompt formats P0-P3, parsers, scorer | `src/trice/templates/`, `src/trice/core/prompting.py`, `src/trice/evaluation/scoring.py` |
+| Seeds | derived only via `trice.schema.derive_seed(purpose, ...)` |
 
 Two decisions are made on training data **after** this tag and are themselves pre-registered
 rules, not free choices:
@@ -41,18 +41,21 @@ No validation split is loaded anywhere.
 
 ## 3. Primary metric
 
-Micro-F1 over multisets of (whitespace-normalized span, label) per sentence, exact span match,
-case-sensitive. Secondary: per-type F1, sentence exact match, invalid-output rate.
+Entity-level micro-F1 with seqeval (conlleval semantics) over IOB2 tags. Predicted mentions are
+aligned to the query tokens: at their own position for inline tags (P3), otherwise at the first
+free exact token-boundary occurrence. This differs from v1's surface-multiset matching only when a
+mention string repeats in a sentence. Mentions with an unknown label or no free occurrence count as
+invalid. Secondary metrics: per-type F1, sentence exact match, invalid-output rate.
 
 ## 4. Tests (alpha = 0.05)
 
 | Question | Test | Family for Holm-Bonferroni |
 |---|---|---|
-| A vs B on one dataset | Approximate randomization on micro-F1, sentence-level swaps, R = 10,000, seeded; 95% paired-bootstrap percentile CI, B = 10,000 | all (model, dataset) cells of one comparison type |
-| A vs B, sentence exact match | Exact McNemar (binomial) | reported with the above |
+| A vs B on one dataset | Paired permutation test on micro-F1 (`scipy.stats.permutation_test`, sentence-level swaps, R = 10,000, exact when 2^n <= R, seeded); 95% paired-bootstrap percentile CI (`scipy.stats.bootstrap`, B = 10,000) | all (model, dataset) cells of one comparison type |
+| A vs B, sentence exact match | Exact McNemar (`statsmodels`) | reported with the above |
 | H1 across datasets, per model | Wilcoxon signed-rank on per-dataset differences | models |
 | H1 against randomness | significance must hold against **all three** random seeds | - |
-| Retriever / format comparison (S2, S3) | Friedman test + Nemenyi critical difference (Demsar 2006); blocks = datasets x reference models; random seeds averaged into one treatment | per study |
+| Retriever / format comparison (S2, S3) | Friedman test + Nemenyi post-hoc and critical-difference diagram (`scikit-posthocs`); blocks = datasets x reference models; random seeds averaged into one treatment | per study |
 | H5 scaling | Page's L trend test per ladder, datasets as blocks, sizes ordered; both directions, Bonferroni x2; Kendall tau per dataset | ladders |
 
 Reported with every difference: effect size, CI, minimum detectable effect from the bootstrap SE,

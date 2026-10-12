@@ -1,0 +1,17 @@
+{#- Gold answer of one example in each output format.
+    mentions: [{"text", "type"}] in order; segments: tokens and whole mentions, space-joined. -#}
+{%- macro answer(fmt, mentions, segments) -%}
+{%- if fmt in ("P0", "P1") -%}
+{%- for m in mentions -%}
+{{ loop.index }}. {{ m.text }} ({{ m.type }}){% if not loop.last %}{{ "\n" }}{% endif %}
+{%- else -%}
+None
+{%- endfor -%}
+{%- elif fmt == "P2" -%}
+{{ {"entities": mentions} | json }}
+{%- else -%}
+{%- for s in segments -%}
+{% if not loop.first %} {% endif %}{% if s.tag %}<{{ s.tag }}>{{ s.text }}</{{ s.tag }}>{% else %}{{ s.text }}{% endif %}
+{%- endfor -%}
+{%- endif -%}
+{%- endmacro -%}

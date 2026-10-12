@@ -1,264 +1,169 @@
-"""From predictions to decisions (S0 format, k*) and pre-registered result tables (S1-S5)."""
+"""Pre-registered tables and figures (S1-S5) and the specialist baselines, from stored predictions."""
 
 import json
 from collections import defaultdict
-from collections.abc import Sequence
-from dataclasses import asdict
-from pathlib import Path
 
 import numpy as np
-from scipy.stats import spearmanr
+import pandas as pd
+from pydantic import BaseModel
 
-from trice.config import models_config, studies_config
-from trice.data.build import label_map
-from trice.eval import stats
-from trice.eval.metrics import counts_matrix, exact_match, f1_of_sums, gold_pairs
-from trice.prompt.formats import FORMATS
-from trice.prompt.labels import LabelSet
-from trice.runner import load_predictions, predictions_path, queries_for
-from trice.select_k import select_k
-from trice.studies import Run, expand, frozen_format, k_star_table, results_dir
+from trice.evaluation.report import Reporter
+from trice.experiment import Experiment
+from trice.schema import Run
 
 
-def run_counts(run: Run) -> np.ndarray:
-    """(n_queries, 3) counts aligned with the run's query set (order checked)."""
-    queries = queries_for(run)
-    preds = load_predictions(run)
-    if [p["query_id"] for p in preds] != [q.id for q in queries]:
-        raise ValueError(f"{run.slug}: predictions do not align with the query set")
-    labels = LabelSet(label_map(run.dataset))
-    return counts_matrix(
-        [[tuple(e) for e in p["entities"]] for p in preds], [gold_pairs(q, labels) for q in queries]
-    )
+class Analysis(BaseModel):
+    experiment: Experiment
+    reporter: Reporter
 
+    def complete(self, study: str) -> bool:
+        try:
+            return all(self.experiment.predictions_path(r).exists() for r in self.experiment.plan(study))
+        except RuntimeError, KeyError:
+            return False
 
-def f1(run: Run) -> float:
-    return float(f1_of_sums(run_counts(run).sum(0)))
+    def paired(self, pairs: list[tuple[Run, Run, dict]]) -> list[dict]:
+        """Paired tests of each (a, b) with Holm correction across the family."""
+        e = self.experiment
+        rows = [
+            {**keys, **e.stats.compare(e.counts(a), e.counts(b), a.slug, b.slug).model_dump()} for a, b, keys in pairs
+        ]
+        return [{**r, "p_holm": p} for r, p in zip(rows, e.stats.holm([r["p_value"] for r in rows]), strict=True)]
 
+    def table_s1(self) -> None:
+        e, runs = self.experiment, {(r.model, r.dataset, r.condition): r for r in self.experiment.plan("S1")}
+        cells = []
+        for (m, d, c), r in sorted(runs.items()):
+            preds = e.predictions(r)
+            invalid = sum(p.invalid for p in preds) / max(1, sum(p.candidates for p in preds))
+            cells.append({"model": m, "dataset": d, "condition": c, "k": r.k, "f1": e.f1(r), "invalid": invalid})
+        self.reporter.table("S1", cells, "Micro-F1 per model, dataset and condition (test).")
+        for baseline in ("random:0", "zero_shot"):
+            name = f"S1-vs-{baseline.replace(':', '')}"
+            rows = self.paired(
+                [
+                    (r, runs[(m, d, baseline)], {"model": m, "dataset": d})
+                    for (m, d, c), r in sorted(runs.items())
+                    if c == "small/full"
+                ]
+            )
+            self.reporter.table(name, rows, f"TRICE vs {baseline}: paired tests, Holm.")
+            deltas: dict[str, list[float]] = defaultdict(list)
+            for row in rows:
+                deltas[row["model"]].append(row["delta"])
+            per_model = [
+                {"model": m, "mean_delta": float(np.mean(v)), "wilcoxon_p": e.stats.wilcoxon(v)}
+                for m, v in deltas.items()
+            ]
+            self.reporter.table(f"{name}-models", per_model, f"TRICE vs {baseline} across datasets (Wilcoxon).")
 
-def invalid_rate(run: Run) -> float:
-    preds = load_predictions(run)
-    cand = sum(p["n_candidates"] for p in preds)
-    return sum(p["n_invalid"] for p in preds) / cand if cand else 0.0
-
-
-def _write(name: str, payload: dict | list) -> Path:
-    path = results_dir() / "tables" / f"{name}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n")
-    return path
-
-
-# --------------------------------------------------------------------------- decisions (train only)
-
-
-def select_format(k: int = 8) -> dict:
-    """S0: format with the highest mean LOO micro-F1 over datasets x reference models."""
-    table: dict[str, dict[str, float]] = defaultdict(dict)
-    for run in expand("S0"):
-        table[run.fmt][f"{run.model}/{run.dataset}"] = f1(run)
-    means = {fmt: float(np.mean(list(v.values()))) for fmt, v in table.items()}
-    winner = max(FORMATS, key=lambda f: (means.get(f, -1.0), -FORMATS.index(f)))
-    payload = {"format": winner, "k": k, "mean_f1": means, "per_cell": table}
-    (results_dir() / "frozen_format.json").write_text(json.dumps(payload, indent=2) + "\n")
-    return payload
-
-
-def select_all_k(study: str = "S1-loo") -> dict:
-    """k* per (model, dataset) from the LOO curves; written to results/k_star.json."""
-    grouped: dict[tuple[str, str], dict[int, np.ndarray]] = defaultdict(dict)
-    for run in expand(study):
-        grouped[(run.model, run.dataset)][run.k] = run_counts(run)
-    path = results_dir() / "k_star.json"
-    out = json.loads(path.read_text()) if path.exists() else {}
-    for (model, dataset), by_k in sorted(grouped.items()):
-        out.setdefault(model, {})[dataset] = asdict(select_k(by_k, seed=(model, dataset)))
-    path.write_text(json.dumps(out, indent=2) + "\n")
-    return out
-
-
-# --------------------------------------------------------------------------- tables
-
-
-def _pair(a: Run, b: Run, seed: tuple) -> dict:
-    ca, cb = run_counts(a), run_counts(b)
-    res = stats.compare(ca, cb, seed=seed)
-    return {**asdict(res), "mcnemar_p": stats.mcnemar_exact(exact_match(ca), exact_match(cb))}
-
-
-def _holm_inplace(rows: Sequence[dict], key: str = "p_value") -> None:
-    adjusted = stats.holm([r[key] for r in rows])
-    for r, p in zip(rows, adjusted, strict=True):
-        r["p_holm"] = float(p)
-
-
-def table_s1(
-    main: str = "small/full", baselines: Sequence[str] = ("random:0", "zero_shot")
-) -> dict:
-    runs = {(r.model, r.dataset, r.condition): r for r in expand("S1")}
-    cells, comparisons = [], {b: [] for b in baselines}
-    for (model, dataset, cond), run in sorted(runs.items()):
-        cells.append(
-            {
-                "model": model,
-                "dataset": dataset,
-                "condition": cond,
-                "k": run.k,
-                "f1": f1(run),
-                "invalid_rate": invalid_rate(run),
-            }
+    def table_friedman(self, study: str, factor: str) -> None:
+        """S2 (factor="condition") and S3 (factor="fmt"): Friedman/Nemenyi with random seeds averaged
+        into one treatment, plus Holm-corrected paired tests of TRICE against each alternative."""
+        e, alternatives = self.experiment, self.experiment.plan(study)
+        reference = {r.model for r in alternatives}
+        s1 = [r for r in e.plan("S1") if r.model in reference]
+        trice = {(r.model, r.dataset): r for r in s1 if r.condition == "small/full"}
+        alternatives += [r for r in s1 if r.condition == "random:0"] if factor == "condition" else []
+        scores: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+        for r in [*trice.values(), *alternatives]:
+            name = str(getattr(r, factor))
+            scores[(r.model, r.dataset)]["random" if name.startswith("random") else name].append(e.f1(r))
+        friedman = e.stats.friedman(
+            pd.DataFrame({b: {t: np.mean(v) for t, v in s.items()} for b, s in scores.items()}).T
         )
-        if cond == main:
-            for b in baselines:
-                row = _pair(run, runs[(model, dataset, b)], seed=(model, dataset, b))
-                comparisons[b].append({"model": model, "dataset": dataset, **row})
-    per_model = {}
-    for b, rows in comparisons.items():
-        _holm_inplace(rows)
-        by_model = defaultdict(list)
-        for r in rows:
-            by_model[r["model"]].append(r["delta"])
-        per_model[b] = {
-            m: {"wilcoxon_p": stats.wilcoxon(d), "mean_delta": float(np.mean(d))}
-            for m, d in by_model.items()
-        }
-    payload = {"cells": cells, "comparisons": comparisons, "across_datasets": per_model}
-    _write("S1", payload)
-    return payload
+        pairs = [
+            (
+                trice[(r.model, r.dataset)],
+                r,
+                {"model": r.model, "dataset": r.dataset, "versus": str(getattr(r, factor))},
+            )
+            for r in alternatives
+        ]
+        self.reporter.table(study, self.paired(pairs), f"{study}: TRICE vs each alternative, paired tests, Holm.")
+        self.reporter.table(f"{study}-friedman", [friedman.model_dump(exclude={"nemenyi"})], f"{study}: Friedman test.")
+        self.reporter.critical_difference(f"{study}-cd", friedman)
 
+    def table_s4(self) -> None:
+        """Regret of the train-chosen k* against the oracle test k, and LOO vs test curves."""
+        e, loo = self.experiment, json.loads(self.experiment.result("k_star.json").read_text())
+        curves: dict[tuple[str, str], dict[int, float]] = defaultdict(dict)
+        for r in e.plan("S4"):
+            curves[(r.model, r.dataset)][r.k] = e.f1(r)
+        rows, points = [], []
+        for (m, d), curve in sorted(curves.items()):
+            chosen, oracle = loo[m][d]["k_star"], max(curve, key=lambda k: (curve[k], -k))
+            rows.append(
+                {
+                    "model": m,
+                    "dataset": d,
+                    "k_star": chosen,
+                    "k_oracle": oracle,
+                    "regret": curve[oracle] - curve[chosen],
+                }
+            )
+            points += [{"dataset": d, "k": k, "f1": f, "curve": "test"} for k, f in curve.items()]
+            points += [
+                {"dataset": d, "k": k, "f1": f, "curve": "train LOO"}
+                for k, f in zip(loo[m][d]["ks"], loo[m][d]["f1"], strict=True)
+            ]
+        self.reporter.table("S4", rows, "Regret of k* (train LOO) against the oracle test k.")
+        self.reporter.lines("S4-curves", pd.DataFrame(points), x="k", y="f1", hue="curve", col="dataset")
 
-def table_friedman(study: str, by: str) -> dict:
-    """S2 (by="condition") and S3 (by="fmt"): Friedman/Nemenyi over the varied factor with blocks =
-    datasets x reference models, plus Holm-corrected paired tests of TRICE against each
-    alternative. Random seeds enter the Friedman test as one averaged treatment, but every seed
-    is tested separately in the paired comparisons (a claim must hold against all of them)."""
-    alts = list(expand(study))
-    ref_models = {r.model for r in alts}
-    trice = {
-        (r.model, r.dataset): r
-        for r in expand("S1")
-        if r.condition == "small/full" and r.model in ref_models
-    }
-    if by == "condition":
-        alts += [r for r in expand("S1") if r.condition == "random:0" and r.model in ref_models]
+    def table_s5(self) -> None:
+        """Scaling: Page's L per ladder on F1 and on the gain over random demonstrations."""
+        e, models = self.experiment, self.experiment.settings.models
+        runs = {(r.model, r.dataset, r.condition): r for r in e.plan("S1")}
+        datasets, rows, points = sorted({d for _, d, _ in runs}), [], []
+        for ladder in sorted({m.ladder for m in models.values()}):
+            names = sorted((n for n, m in models.items() if m.ladder == ladder), key=lambda n: models[n].params_b)
+            if len(names) < 3:  # Page's L needs at least three ordered treatments
+                continue
+            full = np.array([[e.f1(runs[(m, d, "small/full")]) for m in names] for d in datasets])
+            gain = full - np.array([[e.f1(runs[(m, d, "random:0")]) for m in names] for d in datasets])
+            rows += [
+                {"ladder": ladder, "metric": k, **e.stats.page(v).model_dump()}
+                for k, v in (("f1", full), ("gain", gain))
+            ]
+            points += [
+                {"ladder": ladder, "params_b": models[m].params_b, "dataset": d, "f1": full[i, j]}
+                for i, d in enumerate(datasets)
+                for j, m in enumerate(names)
+            ]
+        self.reporter.table("S5", rows, "Scaling: Page's L trend test per ladder.")
+        self.reporter.lines("S5-scaling", pd.DataFrame(points), x="params_b", y="f1", hue="dataset", col="ladder")
 
-    def treatment(r: Run) -> str:
-        name = getattr(r, by)
-        return "random" if name.startswith("random:") else name
+    def run(self) -> list[str]:
+        """Write every table whose runs are complete."""
+        done = []
+        if self.complete("S1"):
+            self.table_s1()
+            self.table_s5()
+            done += ["S1", "S5"]
+            for study, factor in (("S2", "condition"), ("S3", "fmt")):
+                if self.complete(study):
+                    self.table_friedman(study, factor)
+                    done.append(study)
+        if self.complete("S4"):
+            self.table_s4()
+            done.append("S4")
+        return done
 
-    blocks: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
-    for r in [*trice.values(), *alts]:
-        blocks[(r.model, r.dataset)][treatment(r)].append(f1(r))
-    names = sorted({n for b in blocks.values() for n in b})
-    scores = np.array([[float(np.mean(b[n])) for n in names] for b in blocks.values()])
-    fr = stats.friedman_nemenyi(scores, names)
-
-    pairs = []
-    for r in sorted(alts):
-        ref = trice[(r.model, r.dataset)]
-        pairs.append(
-            {
-                "model": r.model,
-                "dataset": r.dataset,
-                "vs": getattr(r, by),
-                **_pair(ref, r, (study, r.slug)),
-            }
-        )
-    _holm_inplace(pairs)
-    payload = {"friedman": asdict(fr), "names": names, "pairs": pairs}
-    _write(study, payload)
-    return payload
-
-
-def table_s4() -> dict:
-    """Regret of the train-chosen k* against the oracle (best-on-test) k, per (model, dataset),
-    and the rank agreement between the LOO curve and the test curve."""
-    grid: dict[tuple[str, str], dict[int, float]] = defaultdict(dict)
-    for r in expand("S4"):
-        grid[(r.model, r.dataset)][r.k] = f1(r)
-    loo = json.loads((results_dir() / "k_star.json").read_text())
-    rows = []
-    for (model, dataset), curve in sorted(grid.items()):
-        sel = loo[model][dataset]
-        k_star = sel["k_star"]
-        k_oracle = max(curve, key=lambda k: (curve[k], -k))
-        common = [k for k in sel["ks"] if k in curve]
-        rho = spearmanr([sel["f1"][sel["ks"].index(k)] for k in common], [curve[k] for k in common])
-        rows.append(
-            {
-                "model": model,
-                "dataset": dataset,
-                "k_star": k_star,
-                "k_oracle": k_oracle,
-                "f1_k_star": curve[k_star],
-                "f1_oracle": curve[k_oracle],
-                "regret": curve[k_oracle] - curve[k_star],
-                "spearman_loo_vs_test": float(rho.statistic),
-            }
-        )
-    payload = {"rows": rows, "mean_regret": float(np.mean([r["regret"] for r in rows]))}
-    _write("S4", payload)
-    return payload
-
-
-def table_s5() -> dict:
-    """Scaling: Page's L trend per ladder on F1(full) and on the retrieval gain over random."""
-    models = models_config()
-    s1 = {(r.model, r.dataset, r.condition): r for r in expand("S1")}
-    datasets = sorted({d for _, d, _ in s1})
-    out = {}
-    for ladder in sorted({m.ladder for m in models.values()}):
-        names = sorted(
-            (n for n, m in models.items() if m.ladder == ladder), key=lambda n: models[n].params_b
-        )
-        if len(names) < 2:
-            continue
-        full = np.array([[f1(s1[(m, d, "small/full")]) for m in names] for d in datasets])
-        rand = np.array([[f1(s1[(m, d, "random:0")]) for m in names] for d in datasets])
-        sizes = [models[n].params_b for n in names]
-        out[ladder] = {
-            "models": names,
-            "f1_full": asdict(stats.page_trend(full)),
-            "gain_vs_random": asdict(stats.page_trend(full - rand)),
-            "kendall_tau_gain": {
-                d: stats.kendall_tau(sizes, (full - rand)[i])[0] for i, d in enumerate(datasets)
-            },
-            "invalid_rate": {
-                m: float(np.mean([invalid_rate(s1[(m, d, "small/full")]) for d in datasets]))
-                for m in names
-            },
-            "k_star": {m: k_star_table().get(m, {}) for m in names},
-        }
-    _write("S5", out)
-    return out
-
-
-def available(study: str) -> bool:
-    try:
-        return all(predictions_path(r).exists() for r in expand(study))
-    except RuntimeError:
-        return False
-
-
-def analyze() -> dict[str, Path]:
-    """Write every table whose runs are complete."""
-    written = {}
-    if available("S1"):
-        table_s1()
-        written["S1"] = results_dir() / "tables" / "S1.json"
-    if available("S2") and available("S1"):
-        table_friedman("S2", "condition")
-        written["S2"] = results_dir() / "tables" / "S2.json"
-    if available("S3") and available("S1"):
-        table_friedman("S3", "fmt")
-        written["S3"] = results_dir() / "tables" / "S3.json"
-    if available("S4"):
-        table_s4()
-        written["S4"] = results_dir() / "tables" / "S4.json"
-    if available("S1"):
-        table_s5()
-        written["S5"] = results_dir() / "tables" / "S5.json"
-    return written
-
-
-__all__ = ["analyze", "frozen_format", "select_all_k", "select_format", "studies_config"]
+    def baselines(self) -> list[dict]:
+        """Score envs/baselines output ({id, entities: [{text, label}]}) with the shared aligner and scorer."""
+        e, rows = self.experiment, []
+        for path in sorted(e.result("baselines").glob("*/*.jsonl")):
+            labels, gold = e.labels(path.stem), e.corpus.load(path.stem, "test")
+            tags = [
+                e.prompter.parse(
+                    "P2",
+                    json.dumps({"entities": [{"text": x["text"], "type": x["label"]} for x in p["entities"]]}),
+                    q,
+                    labels,
+                ).tags
+                for p, q in zip((json.loads(line) for line in path.read_text().splitlines()), gold, strict=True)
+            ]
+            f1 = float(e.evaluator.f1(e.evaluator.counts(tags, [q.tags for q in gold]).sum(0)))
+            rows.append({"system": path.parent.name, "dataset": path.stem, "f1": f1})
+        self.reporter.table("baselines", rows, "Specialist baselines (micro-F1, test).")
+        return rows

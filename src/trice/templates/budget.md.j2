@@ -1,0 +1,13 @@
+{#- Dry-run token budget. -#}
+**Budget** (k = {{ assume_k or "k*" }}, format = {{ assume_format or "frozen" }})
+
+| Study | Calls | Input tokens | Output tokens | Cost (USD) |
+|---|---:|---:|---:|---:|
+{% for s in studies -%}
+| {{ s.study }} | {{ "{:,}".format(s.calls) }} | {{ "{:,}".format(s.input_tokens) }} | {{ "{:,}".format(s.output_tokens) }} | {{ "{:,.2f}".format(s.cost) }} |
+{% endfor -%}
+| **Total** | **{{ "{:,}".format(total.calls) }}** | **{{ "{:,}".format(total.input_tokens) }}** | **{{ "{:,}".format(total.output_tokens) }}** | **{{ "{:,.2f}".format(total.cost) }}** |
+| Ask (x{{ contingency }}) | | {{ "{:,}".format((total.input_tokens * contingency) | int) }} | {{ "{:,}".format((total.output_tokens * contingency) | int) }} | {{ "{:,.2f}".format(total.cost * contingency) }} |
+
+Additive-count self-check: max relative error {{ "{:.4%}".format(max_error) }} over {{ checked }} fully rendered prompts.
+{% if proxies %}Proxied conditions (no rankings yet): {{ proxies | join(", ") }}.{% endif %}

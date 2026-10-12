@@ -5,9 +5,11 @@ description = "Specialist NER baselines (GLiNER family, NuNER-Zero) writing cano
 requires-python = ">=3.14.6,<3.15"
 # gliner pins transformers <5.17, so the baselines live in their own uv project.
 dependencies = [
+    "datasets>=4.0",
     "gliner>=0.2.29",
     "gliner2>=2.1.0",
     "torch>=2.10",
+    "typer>=0.20",
 ]
 
 [tool.uv]

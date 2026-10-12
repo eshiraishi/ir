@@ -1,0 +1,8 @@
+{#- A results table as GitHub Markdown. rows: list of dicts with identical keys. -#}
+**{{ caption }}**
+
+| {{ columns | join(" | ") }} |
+|{% for c in columns %}---|{% endfor %}
+{% for row in rows -%}
+| {% for c in columns %}{{ row[c] | cell }}{% if not loop.last %} | {% endif %}{% endfor %} |
+{% endfor %}

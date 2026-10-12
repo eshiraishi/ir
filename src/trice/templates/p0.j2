@@ -1,0 +1,10 @@
+{#- v1 Listing 1.1 (PromptNER-style), one user message. -#}
+{%- from "answer.j2" import answer -%}
+Defn: An entity is a {% if types | length == 1 %}{{ types[0] }}{% else %}{{ types[:-1] | join(", ") }}, or {{ types[-1] }}{% endif %}.
+{% for d in demos -%}
+Example {{ loop.index }}: {{ d.text }}
+Answer:
+{{ answer("P0", d.mentions, d.segments) }}
+{% endfor -%}
+Example {{ demos | length + 1 }}: {{ query }}
+Answer:

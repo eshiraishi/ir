@@ -1,0 +1,11 @@
+{#- System message of the chat formats P1-P3. -#}
+You are an expert annotator for named entity recognition.
+Entity types: {{ types | join(", ") }}.
+Find every mention of these entity types in the user's text and copy each mention exactly as it appears in the text.
+{% if fmt == "P1" -%}
+Answer with a numbered list in order of appearance, one mention per line, written as `N. mention (entity type)`. If there are no mentions, answer `None`.
+{%- elif fmt == "P2" -%}
+Answer with a JSON object {"entities": [{"text": mention, "type": entity type}, ...]} listing mentions in order of appearance; use an empty list if there are none.
+{%- else -%}
+Answer by repeating the text exactly, wrapping each mention in the tag of its entity type, like <tag>mention</tag>. Tags: {% for t in tags %}<{{ t }}>{% if not loop.last %}, {% endif %}{% endfor %}. Change nothing else.
+{%- endif %}

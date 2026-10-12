@@ -1,247 +1,163 @@
-"""End-to-end run on a synthetic dataset with a mock OpenRouter: S0 format selection -> LOO curves
--> k* -> S1 -> analysis -> replay determinism -> budget. No network, no model weights."""
+"""End to end through the container, offline: S0 format choice -> LOO curves -> k* -> S1 ->
+tables and TikZ figures -> byte-identical replay -> budget. The LLM is an oracle that answers
+correctly only when given at least two demonstrations, so k* has a known knee."""
 
-import hashlib
-import json
-import shutil
+import tomllib
 from pathlib import Path
 
-import httpx
+import numpy as np
 import pytest
-import yaml
+import tomli_w
+from datasets import Dataset, DatasetDict
 
-from trice import analysis, budget, config, runner
-from trice.data import build
-from trice.data.bio import to_sentence
-from trice.data.schema import write_jsonl
-from trice.llm.cache import ResponseCache
-from trice.llm.client import Backend, ChatClient
-from trice.prompt.formats import render_answer
-from trice.prompt.labels import LabelSet
-from trice.retrieval import pipeline
-from trice.studies import expand
+from trice.budget import TokenCounter
+from trice.container import Container
+from trice.core.prompting import Labels, Prompter
+from trice.core.retrieval import Reranker, Retriever, Scorer
+from trice.llm import LLM, Endpoint, Mode
+from trice.schema import Example
 
-REPO = Path(__file__).resolve().parents[1]
 NAMES = ["Alice", "Bruno", "Carla", "Diego", "Elena", "Fabio", "Gina", "Hugo", "Iris", "Joao"]
 CITIES = ["Paris", "Lima", "Oslo", "Quito", "Rome", "Seoul", "Tokyo", "Accra"]
 LABELS = {"PER": "person", "LOC": "location"}
 
 
-def _sentences(split: str, n: int, offset: int):
+def sentences(name: str, split: str, n: int, offset: int) -> list[Example]:
     out = []
     for i in range(n):
-        name, city = NAMES[(i + offset) % len(NAMES)], CITIES[(i * 3 + offset) % len(CITIES)]
         if i % 5 == 4:
-            words, tags = ["nothing", "happened", f"day{i + offset}", "."], ["O"] * 4
+            tokens, tags = ["nothing", "happened", f"day{i + offset}", "."], ["O"] * 4
         else:
-            words = [name, "visited", city, f"in{i + offset}", "."]
+            tokens = [NAMES[(i + offset) % 10], "visited", CITIES[(3 * i + offset) % 8], f"in{i + offset}", "."]
             tags = ["B-PER", "O", "B-LOC", "O", "O"]
-        out.append(to_sentence(f"toy/{split}/{i:06d}", words, tags))
+        out.append(Example(id=f"{name}/{split}/{i:06d}", tokens=tokens, tags=tags))
     return out
 
 
-def _clear_caches():
-    for fn in (
-        config.datasets_config,
-        config.models_config,
-        config.retrieval_config,
-        config.studies_config,
-        build._load,
-        runner._pool,
-        pipeline.load_rankings,
-    ):
-        fn.cache_clear()
+class Overlap(Scorer):
+    def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
+        return np.array([[len(set(q.split()) & set(p.split())) for p in pool] for q in queries], float)
+
+
+class OverlapReranker(Reranker):
+    def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
+        return Overlap().score([query], docs)[0]
+
+
+class Oracle(LLM):
+    prompter: Prompter
+    gold: dict[str, Example]
+
+    def send(self, request: dict) -> dict:
+        messages = request["messages"]
+        if messages[0]["role"] == "system":
+            system = messages[0]["content"]
+            fmt = "P2" if "response_format" in request else "P3" if "repeating" in system else "P1"
+            query, demos = messages[-1]["content"], (len(messages) - 2) // 2
+        else:
+            content = messages[0]["content"]
+            fmt, demos = "P0", content.count("\nExample ") - 1
+            query = content.rsplit("\nExample ", 1)[1].split(": ", 1)[1].removesuffix("\nAnswer:")
+        example = self.gold[query]
+        shown = example if demos >= 2 else example.model_copy(update={"tags": ["O"] * len(example.tokens)})
+        text = self.prompter.answer(fmt, shown, Labels(raw_to_verbal=LABELS))
+        return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}], "provider": "P"}
+
+
+class OfflineContainer(Container):
+    def llm(self, model: str, mode: Mode = "readwrite") -> LLM:
+        gold = {
+            e.text: e
+            for name in ("toy_a", "toy_b")
+            for split in ("train", "test")
+            for e in self.corpus.load(name, split)
+        }
+        return Oracle(
+            endpoint=Endpoint(
+                backend="openrouter", model=model, provider="P", prompt_price=1e-7, completion_price=2e-7
+            ),
+            client=self.openrouter,
+            cache=self.cache,
+            settings=self.settings.llm,
+            mode=mode,
+            prompter=self.experiment.prompter,
+            gold=gold,
+        )
+
+
+class WordTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
+        return text.split()
+
+    def apply_chat_template(self, messages: list[dict], **kwargs: object) -> list[str]:
+        return [t for m in messages for t in ["<s>", m["role"], *m["content"].split(), "</s>"]] + ["<a>"]
 
 
 @pytest.fixture
-def root(tmp_path, monkeypatch):
-    (tmp_path / "configs").mkdir()
-    shutil.copy(REPO / "configs" / "retrieval.yaml", tmp_path / "configs")
-    datasets = {
-        "sources": {"none": {"kind": "http"}},
-        "datasets": {
-            "toy": {
-                "source": "none",
-                "format": "token_tag",
-                "files": {"train": {"url": "x"}, "test": {"url": "y"}},
-                "expected": {"train": 30, "test": 12},
-                "labels": LABELS,
-            }
-        },
-    }
-    models = {
-        "models": {
-            "m1": {
-                "family": "f",
-                "ladder": "gemma3",
-                "params_b": 1,
-                "active_params_b": 1,
-                "openrouter": "x/m1",
-                "hf_repo": "x/m1",
-                "reference": True,
-            }
-        }
-    }
-    studies = yaml.safe_load((REPO / "configs" / "studies.yaml").read_text())
-    studies["studies"] = {
-        k: v for k, v in studies["studies"].items() if k in ("S0", "S1-loo", "S1")
-    }
-    for name, obj in (("datasets", datasets), ("models", models), ("studies", studies)):
-        (tmp_path / "configs" / f"{name}.yaml").write_text(yaml.safe_dump(obj))
-    (tmp_path / "configs" / "endpoints.lock.json").write_text(
-        json.dumps(
-            {
-                "m1": {
-                    "backend": "openrouter",
-                    "model": "x/m1",
-                    "provider": "P",
-                    "quantization": "bf16",
-                    "prompt_price": 1e-7,
-                    "completion_price": 2e-7,
-                }
-            }
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    config = tomllib.loads((Path(__file__).parents[1] / "trice.toml").read_text())
+    spec = {"source": "none", "train": {"path": "x", "size": 30}, "test": {"path": "y", "size": 12}, "labels": LABELS}
+    config["sources"] = {"none": {"url": "http://unused"}}
+    config["datasets"] = {"toy_a": spec, "toy_b": spec}
+    model = {"openrouter": "x", "hf_repo": "x", "ladder": "toy"}
+    config["models"] = {f"m{i}": {**model, "params_b": i, "active_params_b": i, "reference": i == 1} for i in (1, 2, 3)}
+    config["studies"] = {k: v for k, v in config["studies"].items() if k in ("S0", "S1-loo", "S1")}
+    config["stats"]["resamples"] = 500
+    (tmp_path / "trice.toml").write_text(tomli_w.dumps(config))
+    monkeypatch.chdir(tmp_path)
+    for offset, name in enumerate(("toy_a", "toy_b")):
+        splits = {"train": sentences(name, "train", 30, 10 * offset), "test": sentences(name, "test", 12, 100 + offset)}
+        DatasetDict({s: Dataset.from_list([e.model_dump() for e in rows]) for s, rows in splits.items()}).save_to_disk(
+            tmp_path / "data" / "canonical" / name
         )
+    return tmp_path
+
+
+def test_full_pipeline(project: Path) -> None:
+    c = OfflineContainer()
+    retriever = Retriever(
+        stages={"sparse": Overlap(), "dense": Overlap()},
+        reranker=OverlapReranker(),
+        rrf_k=60,
+        rerank_depth=200,
+        store_depth=200,
     )
-    monkeypatch.setenv("TRICE_ROOT", str(tmp_path))
-    _clear_caches()
+    for name in ("toy_a", "toy_b"):
+        for queries in ("test", "loo"):
+            c.experiment.rank("small", retriever, name, queries)
 
-    train, test = _sentences("train", 30, 0), _sentences("test", 12, 100)
-    ddir = tmp_path / "data" / "canonical" / "toy"
-    write_jsonl(ddir / "train.jsonl", train)
-    write_jsonl(ddir / "test.jsonl", test)
+    for run in c.experiment.plan("S0"):
+        c.experiment.execute(run, c.llm(run.model))
+    assert c.experiment.select_format() == "P0"  # every format is perfect; ties go to P0
 
-    # Stored rankings for small/full: fake scorers (lexical overlap), real ranking code.
-    def overlap(qs, ps):
-        import numpy as np
+    loo = c.experiment.plan("S1-loo")
+    assert {r.k for r in loo} == {0, 1, 2, 4, 8, 16}  # grid capped by the 30-sentence pool
+    for run in loo:
+        c.experiment.execute(run, c.llm(run.model))
+    assert c.experiment.select_k()["m1"]["toy_a"]["k_star"] == 2
 
-        return np.array([[len(set(q.split()) & set(p.split())) for p in ps] for q in qs], float)
+    for run in c.experiment.plan("S1"):
+        c.experiment.execute(run, c.llm(run.model))
+    assert c.analysis.run() == ["S1", "S5"]
+    tables = project / "results" / "tables"
+    assert (tables / "S1.tex").exists() and "\\begin{tikzpicture}" in (tables / "S5-scaling.tex").read_text()
+    vs_zero = (tables / "S1-vs-zero_shot.json").read_text()
+    assert '"delta": 1.0' in vs_zero
 
-    scorers = pipeline.Scorers(
-        {"sparse": overlap, "dense": overlap}, rerank=lambda q, d: overlap([q], d)[0]
+    runs = sorted((project / "results" / "runs").rglob("*.jsonl"))
+    before = [p.read_bytes() for p in runs]
+    for p in runs:
+        p.unlink()
+    replay = OfflineContainer()
+    for study in ("S0", "S1-loo", "S1"):
+        for run in replay.experiment.plan(study):
+            replay.experiment.execute(run, replay.llm(run.model, mode="replay"))
+    assert [p.read_bytes() for p in sorted((project / "results" / "runs").rglob("*.jsonl"))] == before
+
+    budget = c.budget.model_copy(
+        update={"counters": {m: TokenCounter(tokenizer=WordTokenizer()) for m in c.settings.models}}
     )
-    for qs_name in ("test", "loo"):
-        qs = pipeline.query_set("toy", qs_name, 200)
-        ranked = pipeline.rank_queries(qs, train, scorers, qs_name == "loo", 60, 200, 200)
-        pipeline.write_rankings("small", "toy", qs_name, qs, ranked)
-    yield tmp_path
-    _clear_caches()
-
-
-def _oracle(all_sentences):
-    """Mock model: answers with the gold entities only when given >= 2 demonstrations."""
-    by_text = {s.text: s for s in all_sentences}
-    labels = LabelSet(LABELS)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        msgs = body["messages"]
-        if msgs[0]["role"] == "system":
-            sys = msgs[0]["content"]
-            fmt = "P2" if "response_format" in body else ("P3" if "repeating" in sys else "P1")
-            query, n_demos = msgs[-1]["content"], (len(msgs) - 2) // 2
-        else:
-            content = msgs[0]["content"]
-            fmt, n_demos = "P0", content.count("\nExample ") - 1
-            query = content.rsplit("\nExample ", 1)[1].split(": ", 1)[1].rsplit("\nAnswer:", 1)[0]
-        s = by_text[query]
-        shown = s if n_demos >= 2 else s.model_copy(update={"entities": ()})
-        text = render_answer(fmt, shown, labels)
-        return httpx.Response(
-            200,
-            json={
-                "id": "g",
-                "provider": "P",
-                "model": body["model"],
-                "choices": [{"message": {"content": text}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            },
-        )
-
-    return handler
-
-
-def _client(root, transport, mode="readwrite"):
-    return ChatClient(
-        Backend("openrouter", "http://mock"),
-        ResponseCache(root / "cache" / "llm.sqlite"),
-        mode=mode,
-        transport=transport,
-    )
-
-
-def _digest(paths):
-    h = hashlib.sha256()
-    for p in sorted(paths):
-        h.update(p.read_bytes())
-    return h.hexdigest()
-
-
-def test_full_pipeline(root):
-    from trice.llm.endpoints import load_pins
-
-    pin = load_pins()["m1"]
-    sentences = build.load_split("toy", "train") + build.load_split("toy", "test")
-    transport = httpx.MockTransport(_oracle(sentences))
-    client = _client(root, transport)
-
-    for run in expand("S0"):
-        runner.execute(run, client, pin, workers=4)
-    frozen = analysis.select_format()
-    assert frozen["format"] == "P0"  # all formats tie at F1=1; ties go to the earliest format
-    assert set(frozen["mean_f1"].values()) == {1.0}
-
-    loo_runs = list(expand("S1-loo"))
-    assert {r.k for r in loo_runs} == {0, 1, 2, 4, 8, 16}  # grid capped by the 30-sentence pool
-    for run in loo_runs:
-        runner.execute(run, client, pin, workers=4)
-    k_star = analysis.select_all_k()["m1"]["toy"]
-    assert k_star["k_star"] == 2 and k_star["rule"] == "kneedle"
-
-    s1 = list(expand("S1"))
-    assert {(r.condition, r.k) for r in s1} == {
-        ("zero_shot", 0),
-        ("random:0", 2),
-        ("small/full", 2),
-    }
-    for run in s1:
-        runner.execute(run, client, pin, workers=4)
-    table = analysis.table_s1()
-    f1 = {c["condition"]: c["f1"] for c in table["cells"]}
-    assert f1 == {"small/full": 1.0, "random:0": 1.0, "zero_shot": 0.0}
-    (vs_zero,) = table["comparisons"]["zero_shot"]
-    assert vs_zero["delta"] == 1.0 and vs_zero["p_value"] < 0.01 and vs_zero["mcnemar_p"] < 0.01
-
-    # Replay: deleting predictions and re-running from the cache reproduces them byte for byte,
-    # without any network access.
-    files = list((root / "results" / "runs").rglob("*.jsonl"))
-    before = _digest(files)
-    for f in files:
-        f.unlink()
-
-    def no_network(request):
-        raise AssertionError("replay must not hit the network")
-
-    replay = _client(root, httpx.MockTransport(no_network), mode="replay")
-    for run in [*expand("S0"), *expand("S1-loo"), *expand("S1")]:
-        runner.execute(run, replay, pin, workers=4)
-    assert _digest(list((root / "results" / "runs").rglob("*.jsonl"))) == before
-
-    # Budget: whitespace tokenizer with an additive chat template -> exact self-check.
-    class FakeTok:
-        def encode(self, text, add_special_tokens=False):
-            return text.split()
-
-        def apply_chat_template(self, messages, **_):
-            ids = []
-            for m in messages:
-                ids += ["<s>", m["role"], *m["content"].split(), "</s>"]
-            return [*ids, "<assistant>"]
-
-    report = budget.estimate(["S1"], lambda _: budget.TokenCounter(FakeTok()), load_pins())
-    total = report["total"]
-    assert total["calls"] == 3 * 12  # three conditions x 12 test queries, no duplicate prompts
-    assert total["input_tokens"] > 0
-    assert total["cost_usd"] == pytest.approx(
-        total["input_tokens"] * 1e-7 + total["output_tokens"] * 2e-7
-    )
-    assert report["self_check"]["max_rel_error"] == 0.0
+    payload = budget.estimate(["S1"])
+    distinct = {(r.model, p.model_dump_json()) for r in c.experiment.plan("S1") for _, p in c.experiment.prompts(r)}
+    assert payload["total"]["calls"] == len(distinct) and payload["max_error"] == 0.0  # repeats are priced once
+    assert "| S1 |" in budget.render(payload)

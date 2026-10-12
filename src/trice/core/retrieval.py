@@ -1,0 +1,92 @@
+"""Demonstration retrieval: first-stage scorers, exact RRF, reranking, and demo selection.
+
+Pure ranking logic; the scorers themselves (models, APIs) live in core/encoders.py.
+"""
+
+import numpy as np
+from pydantic import BaseModel, ConfigDict
+
+from trice.schema import Condition, Example, derive_seed
+
+Ranking = dict[str, list[str]]  # stage -> pool ids, best first
+
+
+class Scorer(BaseModel):
+    """Relevance of every pool text to every query text: an (n_queries, n_pool) array."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
+        raise NotImplementedError
+
+
+class Reranker(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
+        raise NotImplementedError
+
+
+class Retriever(BaseModel):
+    """Stages ``sparse``/``dense``/... (full-pool scores), ``rrf`` (exact RRF over full-pool ranks)
+    and ``full`` (reranker over the top fused candidates). A single first stage is stored as
+    ``full``. Leave-one-out queries never see themselves or pool sentences with identical text."""
+
+    stages: dict[str, Scorer]
+    reranker: Reranker | None = None
+    rrf_k: int
+    rerank_depth: int
+    store_depth: int
+
+    @staticmethod
+    def order(scores: np.ndarray, ids: np.ndarray) -> np.ndarray:
+        """Descending score, ties broken by ascending id."""
+        return np.lexsort((ids, -scores))
+
+    def rank(self, queries: list[Example], pool: list[Example], loo: bool) -> list[Ranking]:
+        pool = sorted(pool, key=lambda e: e.id)
+        ids = np.array([e.id for e in pool])
+        texts = [e.text for e in pool]
+        matrices = {name: s.score([q.text for q in queries], texts) for name, s in self.stages.items()}
+        rankings = []
+        for qi, query in enumerate(queries):
+            keep = np.array([not (loo and (e.id == query.id or e.text == query.text)) for e in pool])
+            kept = np.flatnonzero(keep)
+            ranking, rrf = {}, np.zeros(len(kept))
+            for name, matrix in matrices.items():
+                order = self.order(matrix[qi][kept], ids[kept])
+                ranking[name] = ids[kept][order][: self.store_depth].tolist()
+                ranks = np.empty(len(kept))
+                ranks[order] = np.arange(1, len(kept) + 1)
+                rrf += 1.0 / (self.rrf_k + ranks)
+            if len(matrices) == 1:
+                ranking = {"full": next(iter(ranking.values()))}
+            else:
+                fused = self.order(rrf, ids[kept])
+                ranking["rrf"] = ids[kept][fused][: self.store_depth].tolist()
+                if self.reranker:
+                    cand = kept[fused[: self.rerank_depth]]
+                    scores = self.reranker.score_pairs(query.text, [texts[i] for i in cand])
+                    ranking["full"] = ids[cand][self.order(scores, ids[cand])][: self.store_depth].tolist()
+            rankings.append(ranking)
+        return rankings
+
+
+def demonstrations(
+    condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranking: Ranking | None
+) -> list[Example]:
+    """The k demonstrations for one query, shuffled with the per-query seed so their order never
+    carries rank or dataset order."""
+    if condition.kind == "zero_shot" or k == 0:
+        return []
+    by_id = {e.id: e for e in pool}
+    if condition.kind == "random":
+        ids = sorted(e.id for e in pool if e.id != query.id and e.text != query.text)
+        rng = np.random.default_rng(derive_seed("random", condition.seed, dataset, query.id))
+        chosen = rng.choice(ids, size=k, replace=False).tolist()
+    else:
+        chosen = (ranking or {})[condition.stage][:k]
+        if len(chosen) < k:
+            raise ValueError(f"{dataset}/{query.id}: only {len(chosen)} candidates for k={k}")
+    rng = np.random.default_rng(derive_seed("order", dataset, query.id))
+    return [by_id[i] for i in rng.permutation(sorted(chosen)).tolist()]
