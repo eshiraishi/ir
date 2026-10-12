@@ -1,0 +1,214 @@
+# Datasets used by TRICE. Validation splits are deliberately never loaded.
+#
+# Every source is pinned: git sources by commit, HTTP sources by SHA-256. `trice data fetch`
+# refuses files whose hash does not match. A `sha256: null` entry is recorded on first fetch
+# and must then be committed here (see docs/preregistration.md, data freeze).
+#
+# `labels` maps the raw tag type to the verbalization shown to every model. The same strings
+# are used by all prompt formats; inline-tag names are derived from them (spaces -> "_").
+# The loader fails on any raw label that is not listed, so typos cannot silently drop entities.
+
+sources:
+  crossner:
+    kind: git
+    url: https://github.com/zliucr/CrossNER
+    commit: 2e7ba2a7798c961e3f29fbc51252c5a8d40224bf
+  wnut17:
+    kind: git
+    url: https://github.com/leondz/emerging_entities_17
+    commit: e52a2d2a71ac1a051ca2d532eef28653c5c02603
+  ncbi_disease:
+    kind: git
+    url: https://github.com/spyysalo/ncbi-disease
+    commit: 5a266c6fc76fb2b5184cfa397ff0a5ecdb133aec
+  mit_sls:
+    kind: http
+
+datasets:
+  crossner_politics:
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/politics/train.txt, sha256: 1d8be31abb58463349496fe21b13d70114cf015294a9ff9cce77af9b83e8aa84 }
+      test: { path: ner_data/politics/test.txt, sha256: 05cadc5e129d394f7f92b4a052cf4b6ea4c60878d32a833e500cf046c297455f }
+    expected: { train: 200, test: 651 }
+    labels:
+      country: country
+      election: election
+      event: event
+      location: location
+      misc: miscellaneous
+      organisation: organisation
+      person: person
+      politicalparty: political party
+      politician: politician
+
+  crossner_science:
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/science/train.txt, sha256: 8f6a26096cc7be6790b5790bf5f5b5c8928d8b73d4632e7d45dc8bffad0504ac }
+      test: { path: ner_data/science/test.txt, sha256: 3616d59d4d2b9dbf4c1126f8d8ba47ff97886223c95f93649bfd527343e64ced }
+    expected: { train: 200, test: 543 }
+    labels:
+      academicjournal: academic journal
+      astronomicalobject: astronomical object
+      award: award
+      chemicalcompound: chemical compound
+      chemicalelement: chemical element
+      country: country
+      discipline: discipline
+      enzyme: enzyme
+      event: event
+      location: location
+      misc: miscellaneous
+      organisation: organisation
+      person: person
+      protein: protein
+      scientist: scientist
+      theory: theory
+      university: university
+
+  crossner_music:
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/music/train.txt, sha256: 3774c38e0ebbeb4b98dbfae137071e4911e8764cdb7f247599009841f68d9fb5 }
+      test: { path: ner_data/music/test.txt, sha256: c66e345f959ac65593f76c6b1bd8c6d75f2a6f0bc197389b2e6700d101fd094c }
+    expected: { train: 100, test: 465 }  # v1 Table 2 reported 456; the file has 465.
+    labels:
+      album: album
+      award: award
+      band: band
+      country: country
+      event: event
+      location: location
+      misc: miscellaneous
+      musicalartist: musical artist
+      musicalinstrument: musical instrument
+      musicgenre: music genre
+      organisation: organisation
+      person: person
+      song: song
+
+  crossner_literature:
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/literature/train.txt, sha256: 0647e403a85040742c2f4041cf002146a81aa2e13adda19d0e82a8bcd493c18b }
+      test: { path: ner_data/literature/test.txt, sha256: 77267f8b3e8afe993865c64cfc605f65671f6a0ac9cba65de970f12180fed20e }
+    expected: { train: 100, test: 416 }
+    labels:
+      award: award
+      book: book
+      country: country
+      event: event
+      literarygenre: literary genre
+      location: location
+      magazine: magazine
+      misc: miscellaneous
+      organisation: organisation
+      person: person
+      poem: poem
+      writer: writer
+
+  crossner_ai:
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/ai/train.txt, sha256: 484217a660f52927bd5157507c22fc103b36306364329f62f80fc8acb897b187 }
+      test: { path: ner_data/ai/test.txt, sha256: 7595ad386e0a98067100fe47f86811b38867a236011fee97cfaa90f778c37bcf }
+    expected: { train: 100, test: 431 }
+    labels:
+      algorithm: algorithm
+      conference: conference
+      country: country
+      field: field
+      location: location
+      metrics: metric
+      misc: miscellaneous
+      organisation: organisation
+      person: person
+      product: product
+      programlang: programming language
+      researcher: researcher
+      task: task
+      university: university
+
+  conll2003:
+    # The copy shipped with CrossNER (same commit), as in v1's "Reuters" domain.
+    source: crossner
+    format: token_tag
+    files:
+      train: { path: ner_data/conll2003/train.txt, sha256: 098791b165293cac55aa60ea5395b48ed441bc962c00278aa4789dce68624bf8 }
+      test: { path: ner_data/conll2003/test.txt, sha256: 18d9d738defc506ebc5d6748cb580245327ef5c4357b026d7d9ba7c6e55fe841 }
+    expected: { train: 14041, test: 3453 }
+    labels:
+      location: location
+      misc: miscellaneous
+      organisation: organisation
+      person: person
+
+  mit_movie:
+    # "eng" corpus (12 types), the version used by the UniNER/GLiNER zero-shot benchmark.
+    source: mit_sls
+    format: tag_token
+    files:
+      train: { url: https://groups.csail.mit.edu/sls/downloads/movie/engtrain.bio, sha256: null }
+      test: { url: https://groups.csail.mit.edu/sls/downloads/movie/engtest.bio, sha256: null }
+    expected: { train: 9775, test: 2443 }
+    labels:
+      ACTOR: actor
+      CHARACTER: character
+      DIRECTOR: director
+      GENRE: genre
+      PLOT: plot
+      RATING: rating
+      RATINGS_AVERAGE: average ratings
+      REVIEW: review
+      SONG: song
+      TITLE: title
+      TRAILER: trailer
+      YEAR: year
+
+  mit_restaurant:
+    source: mit_sls
+    format: tag_token
+    files:
+      train: { url: https://groups.csail.mit.edu/sls/downloads/restaurant/restauranttrain.bio, sha256: null }
+      test: { url: https://groups.csail.mit.edu/sls/downloads/restaurant/restauranttest.bio, sha256: null }
+    expected: { train: 7660, test: 1521 }
+    labels:
+      Amenity: amenity
+      Cuisine: cuisine
+      Dish: dish
+      Hours: hours
+      Location: location
+      Price: price
+      Rating: rating
+      Restaurant_Name: restaurant name
+
+  wnut17:
+    source: wnut17
+    format: token_tag
+    files:
+      train: { path: wnut17train.conll, sha256: 731820e13f71af324c6b55a1575ec2ce59fbaa2a0806f8f0400b98d56cd6a7a5 }
+      test: { path: emerging.test.annotated, sha256: 2aa79b764e56ec9264a1b30fdd9b70195bd00ff400b62edd8f399d5f13c178f0 }
+    expected: { train: 3394, test: 1287 }
+    labels:
+      corporation: corporation
+      creative-work: creative work
+      group: group
+      location: location
+      person: person
+      product: product
+
+  ncbi_disease:
+    source: ncbi_disease
+    format: token_tag
+    files:
+      train: { path: conll/train.tsv, sha256: 5f87b0de649eccff21e6d6e49e304aace808056ecae55225ea31602192517be9 }
+      test: { path: conll/test.tsv, sha256: 8f088ce45dc4746592188f9e69de3d89d87f3bb8f0ed8c4a287d018123fa148d }
+    expected: { train: 5432, test: 940 }
+    labels:
+      Disease: disease

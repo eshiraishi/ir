@@ -1,0 +1,21 @@
+# LLMs under study. OpenRouter slugs and HF repos are checked by `trice endpoints` (M4), which
+# writes the pinned provider, quantization, prices and HF tokenizer revision to
+# configs/endpoints.lock.json. Sizes OpenRouter does not serve run locally under
+# envs/serve (vLLM) through the same OpenAI-compatible client.
+#
+# params_b / active_params_b are in billions; for dense models they are equal.
+# `thinking: true` marks hybrid-reasoning models whose thinking must be switched off.
+# `reference: true` marks the two models used for the expensive ablations (S0, S2-S4, S6).
+
+models:
+  qwen3.5-0.8b:  { family: qwen3.5, ladder: qwen3.5-dense, params_b: 0.8, active_params_b: 0.8, openrouter: qwen/qwen3.5-0.8b, hf_repo: Qwen/Qwen3.5-0.8B, thinking: true }
+  qwen3.5-2b:    { family: qwen3.5, ladder: qwen3.5-dense, params_b: 2, active_params_b: 2, openrouter: qwen/qwen3.5-2b, hf_repo: Qwen/Qwen3.5-2B, thinking: true }
+  qwen3.5-4b:    { family: qwen3.5, ladder: qwen3.5-dense, params_b: 4, active_params_b: 4, openrouter: qwen/qwen3.5-4b, hf_repo: Qwen/Qwen3.5-4B, thinking: true }
+  qwen3.5-9b:    { family: qwen3.5, ladder: qwen3.5-dense, params_b: 9, active_params_b: 9, openrouter: qwen/qwen3.5-9b, hf_repo: Qwen/Qwen3.5-9B, thinking: true, reference: true }
+  qwen3.5-27b:   { family: qwen3.5, ladder: qwen3.5-dense, params_b: 27, active_params_b: 27, openrouter: qwen/qwen3.5-27b, hf_repo: Qwen/Qwen3.5-27B, thinking: true, reference: true }
+  qwen3.5-35b-a3b:   { family: qwen3.5, ladder: qwen3.5-moe, params_b: 35, active_params_b: 3, openrouter: qwen/qwen3.5-35b-a3b, hf_repo: Qwen/Qwen3.5-35B-A3B, thinking: true }
+  qwen3.5-122b-a10b: { family: qwen3.5, ladder: qwen3.5-moe, params_b: 122, active_params_b: 10, openrouter: qwen/qwen3.5-122b-a10b, hf_repo: Qwen/Qwen3.5-122B-A10B, thinking: true }
+  qwen3.5-397b-a17b: { family: qwen3.5, ladder: qwen3.5-moe, params_b: 397, active_params_b: 17, openrouter: qwen/qwen3.5-397b-a17b, hf_repo: Qwen/Qwen3.5-397B-A17B, thinking: true }
+  gemma3-4b:  { family: gemma3, ladder: gemma3, params_b: 4, active_params_b: 4, openrouter: google/gemma-3-4b-it, hf_repo: google/gemma-3-4b-it }
+  gemma3-12b: { family: gemma3, ladder: gemma3, params_b: 12, active_params_b: 12, openrouter: google/gemma-3-12b-it, hf_repo: google/gemma-3-12b-it }
+  gemma3-27b: { family: gemma3, ladder: gemma3, params_b: 27, active_params_b: 27, openrouter: google/gemma-3-27b-it, hf_repo: google/gemma-3-27b-it }

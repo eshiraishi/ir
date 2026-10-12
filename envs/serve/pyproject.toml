@@ -1,0 +1,11 @@
+[project]
+name = "trice-serve"
+version = "0.1.0"
+description = "Local OpenAI-compatible server (vLLM) for model sizes OpenRouter does not serve"
+requires-python = ">=3.14.6,<3.15"
+# vLLM pins its own torch/transformers (torch 2.13, transformers <5.18), which is why this lives
+# in a separate uv project instead of an extra of the core package.
+dependencies = ["vllm>=0.31.0"]
+
+[tool.uv]
+package = false

@@ -1,0 +1,40 @@
+# Retrieval stacks. Nothing here is tuned: RRF k=60 is the published constant (Cormack et al.
+# 2009), rerank_depth/store_depth are compute caps fixed a priori, and the reranker instruction
+# below is written once and frozen in docs/preregistration.md.
+#
+# Model revisions are `null` until M2, when `trice rank --pin` resolves and records the HF commit
+# of every local model; API-backed models record the provider instead.
+
+rrf_k: 60
+rerank_depth: 200   # fused candidates passed to the reranker; exhaustive for every CrossNER pool
+store_depth: 200    # candidates kept per query and per stage in the stored rankings
+
+reranker_instruction: >-
+  Given a sentence, retrieve sentences that mention similar kinds of named entities in a similar
+  context.
+
+stacks:
+  # Default TRICE stack: every model < 1B parameters, Apache-2.0, CPU-feasible.
+  small:
+    kind: trice
+    sparse: { id: opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte }
+    dense: { id: Qwen/Qwen3-Embedding-0.6B }
+    reranker: { id: Qwen/Qwen3-Reranker-0.6B }
+
+  # Ablation (S2): large dense + reranker through hosted APIs (OpenRouter), same sparse model.
+  large:
+    kind: trice
+    sparse: { id: opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte }
+    dense: { id: qwen/qwen3-embedding-8b, backend: openrouter }
+    reranker: { id: qwen/qwen3-reranker-8b, backend: openrouter }
+
+  # v1 replicas, for continuity only (S2).
+  v1_bm25:
+    kind: v1_bm25
+    lemmatize: true   # spaCy lookup lemmatizer (no model download needed)
+    bm25_k1: 1.2
+    bm25_b: 0.75
+  v1_dense:
+    kind: v1_dense
+    dense: { id: BAAI/bge-large-en-v1.5 }
+    query_instruction: "Represent this sentence for searching relevant passages: "

@@ -1,0 +1,81 @@
+# Study definitions shared by the runner (`trice run`) and the dry-run budget (`trice budget`),
+# so the budget always prices exactly the calls the runner will make.
+#
+# models:     all | reference | [names]
+# datasets:   all | [names]           (pool-size variants are written `conll2003@50`)
+# queries:    test | loo              (loo = leave-one-out over the training pool)
+# conditions: zero_shot | random:<seed> | <stack>/<stage>
+#             stages: full (RRF + rerank), rrf, sparse, dense; v1 stacks only have `full`
+# k:          k_star | grid | <int>
+# formats:    frozen | others | [P0, P1, P2, P3]
+#             frozen = the S0 winner (results/frozen_format.json); others = the remaining three
+
+k_grid: [0, 1, 2, 4, 8, 16, 32, 64]
+loo_queries: 200          # seeded subsample for non-CrossNER datasets; CrossNER uses every sentence
+pool_sizes: [50, 100, 200, 400, 800, 1600]   # S6 nested pools (plus the full pool)
+
+studies:
+  S0:
+    description: Prompt-format selection on training data only
+    queries: loo
+    models: reference
+    datasets: all
+    conditions: [small/full]
+    k: 8
+    formats: [P0, P1, P2, P3]
+  S1-loo:
+    description: Train-LOO curves used to choose k* per (model, dataset)
+    queries: loo
+    models: all
+    datasets: all
+    conditions: [small/full]
+    k: grid
+    formats: frozen
+  S1:
+    description: Main result
+    queries: test
+    models: all
+    datasets: all
+    conditions: [zero_shot, random:0, small/full]
+    k: k_star
+    formats: frozen
+  S2:
+    description: Retrieval ablation, retriever size, v1 replicas, extra random seeds
+    queries: test
+    models: reference
+    datasets: all
+    conditions: [random:1, random:2, small/sparse, small/dense, small/rrf, large/full, v1_bm25/full, v1_dense/full]
+    k: k_star
+    formats: frozen
+  S3:
+    description: Prompt-format ablation on test
+    queries: test
+    models: reference
+    datasets: all
+    conditions: [small/full]
+    k: k_star
+    formats: others
+  S4:
+    description: Test k-curves for the regret of k*
+    queries: test
+    models: reference
+    datasets: all
+    conditions: [small/full]
+    k: grid
+    formats: frozen
+  S6-loo:
+    description: Pool-size study, LOO curves per pool
+    queries: loo
+    models: [qwen3.5-9b]
+    datasets: [conll2003@50, conll2003@100, conll2003@200, conll2003@400, conll2003@800, conll2003@1600]
+    conditions: [small/full]
+    k: grid
+    formats: frozen
+  S6:
+    description: Pool-size study on test
+    queries: test
+    models: [qwen3.5-9b]
+    datasets: [conll2003@50, conll2003@100, conll2003@200, conll2003@400, conll2003@800, conll2003@1600]
+    conditions: [random:0, small/full]
+    k: k_star
+    formats: frozen
