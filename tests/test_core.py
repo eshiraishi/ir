@@ -147,3 +147,13 @@ def test_select_k():
         "rule": "isotonic-max",
     }
     assert select_k(dict(zip(ks, [0.7, 0.6, 0.6, 0.5, 0.5, 0.4, 0.4, 0.3], strict=True))).k_star == 0
+
+
+def test_extended_attention_mask_is_additive_and_broadcastable():
+    import torch
+
+    from trice.core.encoders import extended_attention_mask
+
+    mask = extended_attention_mask(torch.tensor([[1, 1, 0]]), (1, 3), torch.float32)
+    assert mask.shape == (1, 1, 1, 3)
+    assert mask[0, 0, 0, 0] == 0 and mask[0, 0, 0, 2] == torch.finfo(torch.float32).min

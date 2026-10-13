@@ -12,7 +12,9 @@ import torch
 from diskcache import Cache
 from jinja2 import Environment
 from openai import OpenAI
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, ConfigDict
+from safetensors import safe_open
 from sentence_transformers import SentenceTransformer, SparseEncoder
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
 
@@ -22,6 +24,35 @@ from trice.schema import LocalRef, Message, Runtime
 def fix_determinism(runtime: Runtime) -> None:
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(runtime.threads)
+
+
+def extended_attention_mask(attention_mask: torch.Tensor, input_shape: object, dtype: torch.dtype) -> torch.Tensor:
+    """transformers 4 ``get_extended_attention_mask``: [batch, seq] -> additive [batch, 1, 1, seq]."""
+    return (1.0 - attention_mask[:, None, None, :].to(dtype)) * torch.finfo(dtype).min
+
+
+def patch_remote_model(model: torch.nn.Module, checkpoint: str) -> None:
+    """Make a transformers-4 remote-code model (opensearch sparse, Alibaba-NLP/new-impl) work on
+    transformers 5: restore the removed ``get_extended_attention_mask``, tie the MLM decoder to the
+    word embeddings (the checkpoint omits the weight, v5 leaves it random and zeroes the bias,
+    which is restored from ``checkpoint``), and rebuild the
+    non-persistent buffers v5 leaves uninitialized (garbage ``position_ids``, rotary tables) the
+    way the model's own __init__ does. Idempotent: a correctly initialized model gets the same values."""
+    for module in model.modules():
+        if isinstance(getattr(module, "lm_head", None), torch.nn.Module) and hasattr(module.lm_head, "decoder"):
+            module.lm_head.decoder.weight = module.get_input_embeddings().weight
+            with safe_open(checkpoint, "pt") as f:  # v5 re-initialized the whole decoder, bias included
+                module.lm_head.decoder.bias.data.copy_(f.get_tensor("lm_head.decoder.bias"))
+        if type(module).__name__ == "NewModel" and not hasattr(module, "get_extended_attention_mask"):
+            module.get_extended_attention_mask = lambda mask, shape, device=None, dtype=None: extended_attention_mask(
+                mask, shape, dtype or torch.float32
+            )
+        if "position_ids" in module._buffers:
+            module.position_ids = torch.arange(module.position_ids.size(0), device=module.position_ids.device)
+        if "inv_freq" in module._buffers and hasattr(module, "_set_cos_sin_cache"):
+            device = module.inv_freq.device
+            module.inv_freq = 1.0 / (module.base ** (torch.arange(0, module.dim, 2).float().to(device) / module.dim))
+            module._set_cos_sin_cache(module.max_seq_len_cached, device, torch.get_default_dtype())
 
 
 class SparseScorer(BaseModel):
@@ -35,9 +66,11 @@ class SparseScorer(BaseModel):
     @cached_property
     def model(self) -> SparseEncoder:
         fix_determinism(self.runtime)
-        return SparseEncoder(
+        model = SparseEncoder(
             self.ref.id, revision=self.ref.revision, device=self.runtime.device, trust_remote_code=True
         )
+        patch_remote_model(model, hf_hub_download(self.ref.id, "model.safetensors", revision=self.ref.revision))
+        return model
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         size = self.runtime.batch_size
