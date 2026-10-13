@@ -141,15 +141,15 @@ labels = { location = "location", misc = "miscellaneous", organisation = "organi
 [datasets.mit_movie]        # "eng" corpus, 12 types (UniNER/GLiNER zero-shot benchmark)
 source = "mit_movie"
 columns = "tag_token"
-train = { path = "engtrain.bio", size = 9775 }
-test = { path = "engtest.bio", size = 2443 }
+train = { path = "engtrain.bio", sha256 = "68d90d7b29bc7dbf54efce6dfddbcdcb685293a00eaf76cd48c3acb5d3b68fe8", size = 9775 }
+test = { path = "engtest.bio", sha256 = "2ba7c6da2e5c1d897ebbcbcefad9e0f03eed41b183106e7f26b7f24b704282fd", size = 2443 }
 labels = { ACTOR = "actor", CHARACTER = "character", DIRECTOR = "director", GENRE = "genre", PLOT = "plot", RATING = "rating", RATINGS_AVERAGE = "average ratings", REVIEW = "review", SONG = "song", TITLE = "title", TRAILER = "trailer", YEAR = "year" }
 
 [datasets.mit_restaurant]
 source = "mit_restaurant"
 columns = "tag_token"
-train = { path = "restauranttrain.bio", size = 7660 }
-test = { path = "restauranttest.bio", size = 1521 }
+train = { path = "restauranttrain.bio", sha256 = "f51794247426c975e7701011d4dba668ac6b881358f162e2c2c10709f2d17b9b", size = 7660 }
+test = { path = "restauranttest.bio", sha256 = "09809dd126a3781c4205d06e721752054e51a10b1c98f3495ef17cd723f25ce2", size = 1521 }
 labels = { Amenity = "amenity", Cuisine = "cuisine", Dish = "dish", Hours = "hours", Location = "location", Price = "price", Rating = "rating", Restaurant_Name = "restaurant name" }
 
 [datasets.wnut17]
