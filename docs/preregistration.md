@@ -4,18 +4,19 @@
 > the frozen configuration and tagged `prereg-v1`, **before any test-set request**. After the tag,
 > every change to an item below is reported in the paper as a deviation, with its reason. The
 > method itself is described in `docs/methodology.md`. Items marked **[Dn]** are still open; they
-> are listed in §9 and in `docs/methodology.md` §10, and every one must be resolved before the tag.
+> are listed in §9 and in `docs/methodology.md` §13 (with options and recommendations); every one
+> must be resolved before the tag.
 
 ## 1. Frozen at the tag
 
 | Item | Where |
 |---|---|
 | Datasets: sources, commits, file SHA-256, sentence counts, label verbalizations | `trice.toml` `[sources]`, `[datasets]` |
-| Models: OpenRouter provider and quantization or local vLLM revision, tokenizer revisions | `trice.toml` `[models]`, `results/endpoints.json`, `envs/compose.yaml` |
-| Retrieval: stacks and model revisions, RRF k = 60, rerank depth 200, store depth 200, reranker instruction, runtime device | `trice.toml` `[retrieval]` |
+| Models: OpenRouter provider and quantization **[D8]** or local vLLM revision, tokenizer revisions | `trice.toml` `[models]`, `results/endpoints.json`, `envs/compose.yaml` |
+| Retrieval: stacks and model revisions, RRF k = 60, rerank depth 200, store depth 200, reranker instruction, runtime device **[D7]**; the sparse encoder's remote code **[D18]** | `trice.toml` `[retrieval]` |
 | Stored rankings and their SHA-256 | `data/rankings/` (published with the paper) **[D7]** |
-| Study definitions, k grid, LOO query count, S6 pool sizes, format-selection k | `trice.toml` `[studies]`, `[selection]` |
-| Decoding: temperature 0, top-p 1, seed 0, max 1,024 tokens, thinking off | `trice.toml` `[llm]` |
+| Study definitions, k grid **[D17]**, LOO query count, S6 pool sizes, format-selection k | `trice.toml` `[studies]`, `[selection]` |
+| Decoding: temperature 0, top-p 1, seed 0, max 1,024 tokens, thinking off **[D20]** | `trice.toml` `[llm]`, `src/trice/llm.py` |
 | Prompt formats P0–P3, parsers, aligner, scorer | `src/trice/templates/`, `src/trice/core/formats.py`, `src/trice/evaluation/scoring.py` |
 | Statistical procedures and resample counts | this file §5, `trice.toml` `[stats]`, `src/trice/evaluation/inference.py`, `src/trice/analyzer.py` |
 | Seeds | only through `trice.schema.derive_seed(purpose, ...)`; LLM seed 0 |
@@ -37,8 +38,8 @@ query and any pool sentence with identical text are excluded from its candidates
      for every model and study. Ties go to the earlier format (P0 < P1 < P2 < P3).
    - **Output:** `results/frozen_format.json`.
 2. **Number of demonstrations k\* (S1-loo; S6-loo for the S6 pools).**
-   - **Curve:** per (model, dataset), LOO micro-F1 on the grid {0, 1, 2, 4, 8, 16, 32, 64},
-     keeping only k smaller than the pool size.
+   - **Curve:** per (model, dataset), LOO micro-F1 on the grid {0, 1, 2, 4, 8, 16, 32, 64}
+     **[D17]**, keeping only k smaller than the pool size.
    - **Rule:** fit an isotonic regression to the curve, then take the Kneedle knee (S = 1,
      concave, increasing) on a linear k axis. If there is no knee, take the smallest k that reaches
      the isotonic maximum.
@@ -60,7 +61,7 @@ Unless stated otherwise, a study uses the test split, k = k\* and the frozen for
 | S4 | reference | test | `small/full` | grid |
 | S5 | all, per ladder | S1 output | `small/full` vs `random:0` | – |
 | S6-loo / S6 | Qwen3.5-9B | CoNLL-2003 pools of 50–1,600 (nested) | `small/full` / `random:0`, `small/full` | grid / k\* |
-| S7 | **[D12]** | 300 seeded S1 `small/full` prompts, sent 3 times on different days with the cache bypassed | – | – |
+| S7 | **[D12]** | 300 seeded S1 `small/full` prompts, sent 3 times on different days with the cache bypassed **[D19]** | – | – |
 | S8 | **[D12]** | the 40 lines after the first 40 of each raw test file | – | – |
 
 The specialist baselines (GLiNER family, NuNER-Zero) are descriptive **[D14]**.
@@ -129,7 +130,10 @@ Every reported difference comes with:
 - **Rankings:** computed once in fp32 with deterministic torch, stored, and hashed.
 - **Response cache:** every response is stored under the SHA-256 of its canonical request, so every
   analysis replays byte-identically from the cache.
-- **Residual nondeterminism:** S7 quantifies the nondeterminism of hosted inference that remains.
+- **Residual nondeterminism:** S7 quantifies the nondeterminism of hosted inference that remains
+  **[D19]**.
+- **Smoke test:** before any study, `trice smoke` checks that every format parses, that the pinned
+  provider answered, and that no reasoning tokens were produced **[D20]**.
 
 ## 8. Known deviations from v1, declared in advance
 
@@ -141,7 +145,7 @@ Every reported difference comes with:
 
 ## 9. Open before the tag
 
-These decisions are detailed in `docs/methodology.md` §10:
+These decisions are detailed in `docs/methodology.md` §13:
 
 - **D1:** duplicate-text exclusion is asymmetric between random and retrieval for test queries.
 - **D2:** three random seeds exist only for the reference models.
@@ -154,6 +158,10 @@ These decisions are detailed in `docs/methodology.md` §10:
 - **D12:** S7 and S8 models and days.
 - **D13:** failure policy.
 - **D14:** the baselines' role.
+- **D17:** the range of the k grid.
+- **D18:** pinning the sparse encoder's remote code.
+- **D19:** how S7 is interpreted.
+- **D20:** verifying that thinking is off.
 
 When the decisions are resolved, delete this section, update the items above, commit, and tag
 `prereg-v1`.
