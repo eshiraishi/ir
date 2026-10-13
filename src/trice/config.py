@@ -35,6 +35,7 @@ class LLMConfig(BaseModel):
     max_retries: int
     timeout: float
     workers: int
+    allow_spend: bool
     quantization_preference: list[str]
     required_parameters: list[str]
 

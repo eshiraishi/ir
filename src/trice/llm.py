@@ -33,8 +33,12 @@ class OpenAITransport(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     client: OpenAI
+    backend: Backend
+    allow_spend: bool = False
 
     def send(self, request: dict) -> dict:
+        if self.backend == "openrouter" and not self.allow_spend:
+            raise PermissionError("OpenRouter requests are blocked: llm.allow_spend is false in trice.toml")
         return self.client.chat.completions.create(**request).model_dump()
 
 

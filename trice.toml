@@ -26,6 +26,9 @@ max_tokens = 1024
 max_retries = 8
 timeout = 300.0
 workers = 16
+# Spend guard: while false, every request that would reach OpenRouter raises PermissionError.
+# Only the project owner changes this.
+allow_spend = false
 # Endpoint pinning: most faithful precision first, then cheapest, then provider name.
 quantization_preference = ["bf16", "fp16", "fp32", "fp8", "int8", "fp6", "fp4", "int4", "unknown"]
 # Every format must work on the pinned provider (P2 needs structured outputs).

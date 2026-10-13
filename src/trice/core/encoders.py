@@ -151,10 +151,13 @@ class ApiClient(BaseModel):
 
     client: OpenAI
     cache: Cache
+    allow_spend: bool = False
 
     def post(self, path: str, body: dict) -> dict:
         key = hashlib.sha256(json.dumps([path, body], sort_keys=True).encode()).hexdigest()
         if key not in self.cache:
+            if not self.allow_spend:
+                raise PermissionError("OpenRouter requests are blocked: llm.allow_spend is false in trice.toml")
             self.cache[key] = self.client.post(path, body=body, cast_to=object)
         return cast(dict, self.cache[key])
 

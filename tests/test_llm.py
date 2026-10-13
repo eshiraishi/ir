@@ -1,9 +1,11 @@
+import httpx2 as httpx
 import pytest
 from diskcache import Cache
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from trice.llm import LLM, Endpoint, Pinner
+from trice.core.encoders import ApiClient
+from trice.llm import LLM, Endpoint, OpenAITransport, Pinner
 from trice.schema import Prompt
 
 PROMPT = Prompt(messages=[{"role": "user", "content": "hi"}], response_format={"type": "json_schema"}, stop=["\nX"])
@@ -87,3 +89,71 @@ def test_pinner_prefers_precision_then_price(app):
     )
     assert choice["provider_name"] == "B"
     assert pinner.choose_endpoint([endpoint("NoSchema", "bf16", 1e-9, ["temperature"])], thinking=False) is None
+
+
+REQ = {"model": "m", "messages": []}
+OK = {"id": "x", "object": "chat.completion", "created": 0, "model": "m", "choices": []}
+
+
+class Network:
+    """A real OpenAI client over a mock HTTP transport; counts requests that would leave the machine."""
+
+    def __init__(self, body: dict):
+        self.calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.calls += 1
+            return httpx.Response(200, json=body)
+
+        self.client = OpenAI(
+            base_url="http://mock/v1",
+            api_key="x",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+
+def test_allow_spend_defaults_to_false(app):
+    assert app.config.llm.allow_spend is False
+
+
+def test_openrouter_transport_blocked_without_allow_spend():
+    net = Network({})
+    with pytest.raises(PermissionError):
+        OpenAITransport(client=net.client, backend="openrouter").send(REQ)
+    assert net.calls == 0
+
+
+def test_local_transport_allowed_without_allow_spend():
+    net = Network(OK)
+    assert OpenAITransport(client=net.client, backend="local").send(REQ)["id"] == OK["id"]
+
+
+def test_openrouter_transport_allowed_when_enabled():
+    net = Network(OK)
+    assert OpenAITransport(client=net.client, backend="openrouter", allow_spend=True).send(REQ)["id"] == OK["id"]
+
+
+def test_api_client_blocks_misses_but_replays_cache(tmp_path):
+    net, cache = Network({"data": 1}), Cache(tmp_path / "api")
+    api = ApiClient(client=net.client, cache=cache)
+    with pytest.raises(PermissionError):
+        api.post("/embeddings", {"input": ["a"]})
+    assert net.calls == 0
+    ApiClient(client=net.client, cache=cache, allow_spend=True).post("/embeddings", {"input": ["a"]})
+    assert net.calls == 1
+    assert api.post("/embeddings", {"input": ["a"]}) == {"data": 1}  # replay needs no permission
+    assert net.calls == 1
+
+
+def test_llm_replays_openrouter_cache_without_allow_spend(app, tmp_path):
+    cache, net = Cache(tmp_path / "llm"), Network(OK)
+    transport = OpenAITransport(client=net.client, backend="openrouter")
+    live = LLM(endpoint=PINNED, transport=transport, cache=cache, config=app.config.llm)
+    with pytest.raises(PermissionError):
+        live.complete(PROMPT)
+    cache[live.hash_request(live.render_request(PROMPT))] = {
+        "choices": [{"message": {"content": "cached"}, "finish_reason": "stop"}]
+    }
+    assert live.complete(PROMPT).text == "cached"
+    assert net.calls == 0

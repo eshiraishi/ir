@@ -63,8 +63,11 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
             )
         )
         local = stack.enter_context(OpenAI(base_url=llm.local_url, api_key="local", timeout=llm.timeout))
-        transports = {"openrouter": transport or OpenAITransport(client=openrouter)}
-        transports["local"] = transport or OpenAITransport(client=local)
+        transports = {
+            "openrouter": transport
+            or OpenAITransport(client=openrouter, backend="openrouter", allow_spend=llm.allow_spend)
+        }
+        transports["local"] = transport or OpenAITransport(client=local, backend="local")
 
         # Data and prompt formats (the order is the order of the S0 candidates).
         corpus = Corpus(raw=layout.raw, canonical=layout.canonical, sources=config.sources, specs=config.datasets)
@@ -76,7 +79,7 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
         }
 
         # Retrieval stacks: local models by default, OpenRouter when a model says so.
-        api = ApiClient(client=openrouter, cache=cache)
+        api = ApiClient(client=openrouter, cache=cache, allow_spend=llm.allow_spend)
 
         def scorer(ref: ModelRef, stage: str, prompt: str | None = None) -> Scorer:
             if ref.backend == "openrouter":
