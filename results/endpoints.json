@@ -1,5 +1,6 @@
-{
-  "qwen3.5-9b": {
+[
+  {
+    "name": "qwen3.5-9b",
     "backend": "openrouter",
     "model": "qwen/qwen3.5-9b",
     "provider": "DeepInfra",
@@ -9,7 +10,8 @@
     "completion_price": 1.5e-07,
     "hf_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
   },
-  "qwen3.5-27b": {
+  {
+    "name": "qwen3.5-27b",
     "backend": "openrouter",
     "model": "qwen/qwen3.5-27b",
     "provider": "DeepInfra",
@@ -19,7 +21,8 @@
     "completion_price": 2.6e-06,
     "hf_revision": "fc05daec18b0a78c049392ed2e771dde82bdf654"
   },
-  "qwen3.5-35b-a3b": {
+  {
+    "name": "qwen3.5-35b-a3b",
     "backend": "openrouter",
     "model": "qwen/qwen3.5-35b-a3b",
     "provider": "DeepInfra",
@@ -29,7 +32,8 @@
     "completion_price": 1e-06,
     "hf_revision": "59d61f3ce65a6d9863b86d2e96597125219dc754"
   },
-  "qwen3.5-122b-a10b": {
+  {
+    "name": "qwen3.5-122b-a10b",
     "backend": "openrouter",
     "model": "qwen/qwen3.5-122b-a10b",
     "provider": "Alibaba",
@@ -39,7 +43,8 @@
     "completion_price": 2.08e-06,
     "hf_revision": "dc4d348443bc740c68e2d77492492c11606384d5"
   },
-  "qwen3.5-397b-a17b": {
+  {
+    "name": "qwen3.5-397b-a17b",
     "backend": "openrouter",
     "model": "qwen/qwen3.5-397b-a17b",
     "provider": "DeepInfra",
@@ -49,7 +54,8 @@
     "completion_price": 3e-06,
     "hf_revision": "8472618112abcbd45acbcdc58436aff4233c23f7"
   },
-  "gemma3-4b": {
+  {
+    "name": "gemma3-4b",
     "backend": "openrouter",
     "model": "google/gemma-3-4b-it",
     "provider": "DeepInfra",
@@ -59,7 +65,8 @@
     "completion_price": 1e-07,
     "hf_revision": "093f9f388b31de276ce2de164bdc2081324b9767"
   },
-  "gemma3-12b": {
+  {
+    "name": "gemma3-12b",
     "backend": "openrouter",
     "model": "google/gemma-3-12b-it",
     "provider": "DeepInfra",
@@ -69,7 +76,8 @@
     "completion_price": 1.5e-07,
     "hf_revision": "96b6f1eccf38110c56df3a15bffe176da04bfd80"
   },
-  "gemma3-27b": {
+  {
+    "name": "gemma3-27b",
     "backend": "openrouter",
     "model": "google/gemma-3-27b-it",
     "provider": "NextBit",
@@ -79,7 +87,8 @@
     "completion_price": 3e-07,
     "hf_revision": "005ad3404e59d6023443cb575daa05336842228a"
   },
-  "qwen3.5-0.8b": {
+  {
+    "name": "qwen3.5-0.8b",
     "backend": "local",
     "model": "Qwen/Qwen3.5-0.8B",
     "provider": null,
@@ -89,7 +98,8 @@
     "completion_price": 0.0,
     "hf_revision": "2fc06364715b967f1860aea9cf38778875588b17"
   },
-  "qwen3.5-2b": {
+  {
+    "name": "qwen3.5-2b",
     "backend": "local",
     "model": "Qwen/Qwen3.5-2B",
     "provider": null,
@@ -99,7 +109,8 @@
     "completion_price": 0.0,
     "hf_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc"
   },
-  "qwen3.5-4b": {
+  {
+    "name": "qwen3.5-4b",
     "backend": "local",
     "model": "Qwen/Qwen3.5-4B",
     "provider": null,
@@ -109,4 +120,4 @@
     "completion_price": 0.0,
     "hf_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
   }
-}
+]

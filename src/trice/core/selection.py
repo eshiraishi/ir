@@ -1,6 +1,6 @@
-"""Train-only decisions: the number of demonstrations k* and the prompt format.
+"""Train-only choice of the number of demonstrations k*.
 
-k*: LOO micro-F1 over the k grid, isotonic regression (monotone, parameter-free), then the Kneedle
+LOO micro-F1 over the k grid, isotonic regression (monotone, parameter-free), then the Kneedle
 knee (S=1, concave, increasing) on a linear k axis, because prompt cost grows linearly in k.
 Without a knee, the smallest k reaching the isotonic maximum.
 """
@@ -9,8 +9,6 @@ import numpy as np
 from kneed import KneeLocator
 from pydantic import BaseModel
 from sklearn.isotonic import IsotonicRegression
-
-from trice.schema import FormatName
 
 
 class KSelection(BaseModel):
@@ -31,8 +29,3 @@ def select_k(f1_by_k: dict[int, float]) -> KSelection:
     else:
         k_star, rule = int(knee), "kneedle"
     return KSelection(k_star=k_star, rule=rule, ks=ks, f1=f1.tolist(), f1_isotonic=iso.tolist())
-
-
-def select_format(mean_f1: dict[FormatName, float]) -> FormatName:
-    """Highest mean LOO F1; ties go to the earliest format (P0 < P1 < P2 < P3)."""
-    return max(sorted(mean_f1), key=lambda fmt: mean_f1[fmt])

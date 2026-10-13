@@ -1,28 +1,29 @@
 """All configuration: trice.toml (+ secrets from .env), parsed once by compose()."""
 
-from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict, TomlConfigSettingsSource
 
-from trice.schema import FormatName, LabelMap, ModelRef, QuerySet, Runtime, Split
+from trice.schema import FormatName, LabelMap, ModelRef, PathTemplate, QuerySet, Runtime, Split
 
 
 class Layout(BaseModel):
-    raw: Path
-    canonical: Path
-    rankings: Path
-    cache: Path
-    endpoints: Path
-    frozen_format: Path
-    k_star: Path
-    runs: Path
-    audit: Path
-    contamination: Path
-    baselines: Path
-    budget: Path
-    tables: Path
+    raw: PathTemplate
+    canonical: PathTemplate
+    rankings: PathTemplate
+    cache: PathTemplate
+    endpoints: PathTemplate
+    frozen_format: PathTemplate
+    k_star: PathTemplate
+    runs: PathTemplate
+    runs_partial: PathTemplate
+    audit: PathTemplate
+    contamination: PathTemplate
+    baselines: PathTemplate
+    training: PathTemplate
+    budget: PathTemplate
+    tables: PathTemplate
 
 
 class LLMConfig(BaseModel):
@@ -105,9 +106,20 @@ class DatasetSpec(BaseModel):
     test: FileSpec
     labels: LabelMap
 
-    @property
-    def files(self) -> dict[Split, FileSpec]:
-        return {"train": self.train, "test": self.test}
+    def select(self, split: Split) -> FileSpec:
+        match split:
+            case "train":
+                return self.train
+            case "test":
+                return self.test
+
+
+class BaselineSpec(BaseModel):
+    library: Literal["gliner", "gliner2"]
+    model: str
+    revision: str
+    finetune: bool = False  # few-shot fine-tuning on each training pool (gliner only)
+    seeds: list[int] = [0, 1, 2]
 
 
 class ModelSpec(BaseModel):
@@ -142,6 +154,7 @@ class Config(BaseSettings):
     sources: dict[str, SourceSpec]
     datasets: dict[str, DatasetSpec]
     models: dict[str, ModelSpec]
+    baselines: dict[str, BaselineSpec]
     studies: dict[str, StudySpec]
 
     @classmethod

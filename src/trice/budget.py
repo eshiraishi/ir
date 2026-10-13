@@ -17,7 +17,25 @@ from transformers import AutoTokenizer
 
 from trice.llm import Endpoint
 from trice.runner import Runner
-from trice.schema import Condition, FormatName, Run
+from trice.schema import Condition, FormatName, Message, Run
+
+
+class Cost(BaseModel):
+    study: str
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0  # USD at the pinned endpoints' prices
+
+
+class BudgetReport(BaseModel):
+    assume_k: int | None
+    assume_format: FormatName | None
+    studies: list[Cost]
+    total: Cost
+    max_error: float  # of the additive counting shortcut, over `checked` fully rendered prompts
+    checked: int
+    proxies: list[str]  # conditions priced with a stand-in because their rankings do not exist yet
 
 
 class TokenCounter(BaseModel):
@@ -32,18 +50,22 @@ class TokenCounter(BaseModel):
             self.texts[text] = len(self.tokenizer.encode(text, add_special_tokens=False))
         return self.texts[text]
 
-    def count_exact(self, messages: list[dict]) -> int:
+    def count_exact(self, messages: list[Message]) -> int:
         return len(
             self.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True, return_dict=False, enable_thinking=False
+                [m.model_dump() for m in messages],
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=False,
+                enable_thinking=False,
             )
         )
 
-    def count_messages(self, messages: list[dict]) -> int:
-        roles = tuple(m["role"] for m in messages)
+    def count_messages(self, messages: list[Message]) -> int:
+        roles = tuple(m.role for m in messages)
         if roles not in self.overheads:
-            self.overheads[roles] = self.count_exact([{"role": r, "content": ""} for r in roles])
-        return self.overheads[roles] + sum(self.count_text(m["content"]) for m in messages)
+            self.overheads[roles] = self.count_exact([Message(role=r, content="") for r in roles])
+        return self.overheads[roles] + sum(self.count_text(m.content) for m in messages)
 
 
 class Budget(BaseModel):
@@ -51,28 +73,18 @@ class Budget(BaseModel):
 
     runner: Runner
     env: Environment
-    endpoints: dict[str, Endpoint]
+    endpoints: list[Endpoint]
     counters: dict[str, TokenCounter] = Field(default_factory=dict)
 
     def load_counter(self, model: str) -> TokenCounter:
         if model not in self.counters:
-            spec, endpoint = self.runner.config.models[model], self.endpoints.get(model)
-            revision = endpoint.hf_revision if endpoint else None
+            endpoint = next((e for e in self.endpoints if e.name == model), None)
             self.counters[model] = TokenCounter(
-                tokenizer=AutoTokenizer.from_pretrained(spec.hf_repo, revision=revision)
+                tokenizer=AutoTokenizer.from_pretrained(
+                    self.runner.config.models[model].hf_repo, revision=endpoint.hf_revision if endpoint else None
+                )
             )
         return self.counters[model]
-
-    def derive_proxy(self, run: Run) -> Run:
-        """A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
-        priced with small/full, else random demonstrations: same k and format, same length."""
-        if Condition.parse(run.condition).kind != "retrieval":
-            return run
-        for candidate in (run.condition, "small/full"):
-            stack = Condition.parse(candidate).stack
-            if (self.runner.config.layout.rankings / stack / run.dataset / run.queries).exists():
-                return run.model_copy(update={"condition": candidate})
-        return run.model_copy(update={"condition": "random:0"})
 
     def estimate(
         self,
@@ -82,7 +94,7 @@ class Budget(BaseModel):
         models: list[str] | None = None,
         datasets: list[str] | None = None,
         checks: int = 200,
-    ) -> dict:
+    ) -> BudgetReport:
         """Tokens and cost per study. Identical requests are counted once (the replay cache serves
         repeats), and prompts are built once per (dataset, queries, condition, format, k)."""
         stats = self.runner.config.stats
@@ -91,19 +103,34 @@ class Budget(BaseModel):
             for run in self.runner.expand_plan(study, assume_k, assume_format, models, datasets):
                 groups[(run.dataset, run.queries, run.condition, run.fmt, run.k)].append((study, run))
         seen: set[str] = set()
-        totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        totals = {study: Cost(study=study) for study in studies}
         sample, rnd, calls, proxies = [], random.Random(0), 0, set()
         for members in groups.values():
             first = members[0][1]
-            priced = self.derive_proxy(first)
+            # A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
+            # priced with small/full, else random demonstrations: same k and format, same length.
+            priced = first
+            if Condition.parse(first.condition).kind == "retrieval":
+                stored = next(
+                    (
+                        c
+                        for c in (first.condition, "small/full")
+                        if self.runner.config.layout.rankings.fill(
+                            stack=Condition.parse(c).stack, dataset=first.dataset, queries=first.queries
+                        ).exists()
+                    ),
+                    "random:0",
+                )
+                priced = first.model_copy(update={"condition": stored})
             if priced.condition != first.condition:
                 proxies.add(f"{first.condition}->{priced.condition}")
             labels = self.runner.corpus.load_labels(first.dataset)
             pairs = self.runner.render_prompts(priced)
             for study, run in members:
-                counter, endpoint = (
-                    self.load_counter(run.model),
-                    self.endpoints.get(run.model, Endpoint(backend="local", model=run.model)),
+                counter = self.load_counter(run.model)
+                endpoint = next(
+                    (e for e in self.endpoints if e.name == run.model),
+                    Endpoint(name=run.model, backend="local", model=run.model),
                 )
                 for query, prompt in pairs:
                     key = hashlib.sha256(
@@ -115,11 +142,10 @@ class Budget(BaseModel):
                     n_in = counter.count_messages(prompt.messages)
                     answer = self.runner.formats[run.fmt].render_answer(labels, query)
                     n_out = round(counter.count_text(answer) * stats.output_factor + stats.output_extra)
-                    row = totals[study]
-                    row["calls"] += 1
-                    row["input_tokens"] += n_in
-                    row["output_tokens"] += n_out
-                    row["cost"] += n_in * endpoint.prompt_price + n_out * endpoint.completion_price
+                    totals[study].calls += 1
+                    totals[study].input_tokens += n_in
+                    totals[study].output_tokens += n_out
+                    totals[study].cost += n_in * endpoint.prompt_price + n_out * endpoint.completion_price
                     calls += 1
                     if len(sample) < checks:
                         sample.append((run.model, prompt.messages))
@@ -130,18 +156,21 @@ class Budget(BaseModel):
             / self.load_counter(m).count_exact(msgs)
             for m, msgs in sample
         ]
-        rows = [{"study": s, **{k: int(v) if k != "cost" else v for k, v in t.items()}} for s, t in totals.items()]
-        keys = ("calls", "input_tokens", "output_tokens", "cost")
-        total = {k: sum(t[k] for t in totals.values()) for k in keys}
-        return {
-            "assume_k": assume_k,
-            "assume_format": assume_format,
-            "studies": rows,
-            "total": total,
-            "max_error": max(errors, default=0.0),
-            "checked": len(errors),
-            "proxies": sorted(proxies),
-        }
+        return BudgetReport(
+            assume_k=assume_k,
+            assume_format=assume_format,
+            studies=list(totals.values()),
+            total=Cost(
+                study="total",
+                calls=sum(t.calls for t in totals.values()),
+                input_tokens=sum(t.input_tokens for t in totals.values()),
+                output_tokens=sum(t.output_tokens for t in totals.values()),
+                cost=sum(t.cost for t in totals.values()),
+            ),
+            max_error=max(errors, default=0.0),
+            checked=len(errors),
+            proxies=sorted(proxies),
+        )
 
-    def render(self, payload: dict, contingency: float = 1.5) -> str:
-        return self.env.get_template("budget.md.j2").render(contingency=contingency, **payload)
+    def render(self, report: BudgetReport, contingency: float = 1.5) -> str:
+        return self.env.get_template("budget.md.j2").render(report=report, contingency=contingency)

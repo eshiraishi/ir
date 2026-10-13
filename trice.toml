@@ -1,20 +1,24 @@
 # TRICE configuration: the single source of truth, parsed by trice.config.Config.
 # Secrets (OPENROUTER_API_KEY, HF_TOKEN) live in .env, never here.
 
+# Every file the pipeline reads or writes, as a relative path template. Placeholders are filled by
+# the code; a placeholder set to * makes the template a glob.
 [layout]
-raw = "data/raw"
-canonical = "data/canonical"
-rankings = "data/rankings"
+raw = "data/raw/{source}/{path}"                    # an empty {path} is the checkout directory
+canonical = "data/canonical/{dataset}"
+rankings = "data/rankings/{stack}/{dataset}/{queries}"
 cache = "cache/responses"
 endpoints = "results/endpoints.json"
 frozen_format = "results/frozen_format.json"
 k_star = "results/k_star.json"
-runs = "results/runs"
-audit = "results/audit"
-contamination = "results/contamination"
-baselines = "results/baselines"
-budget = "results/budget"
-tables = "results/tables"
+runs = "results/runs/{slug}.jsonl"
+runs_partial = "results/runs/{slug}.partial"
+audit = "results/audit/{model}/{tag}.jsonl"
+contamination = "results/contamination/{model}.json"
+baselines = "results/baselines/{system}/{dataset}.jsonl"
+training = "cache/gliner/{system}/{dataset}"         # fine-tuning scratch (envs/baselines)
+budget = "results/budget/k{k}-{format}.json"
+tables = "results/tables/{name}.{suffix}"
 
 [llm]
 openrouter_url = "https://openrouter.ai/api/v1"
@@ -300,3 +304,33 @@ k = "grid"
 models = ["qwen3.5-9b"]
 datasets = ["conll2003@50", "conll2003@100", "conll2003@200", "conll2003@400", "conll2003@800", "conll2003@1600"]
 conditions = ["random:0", "small/full"]
+
+# Specialist baselines (envs/baselines, run in Docker): zero-shot, and few-shot fine-tuning where
+# `finetune` is set. Revisions are pinned commits of the Hugging Face repositories.
+[baselines.gliner2-large]
+library = "gliner2"
+model = "fastino/gliner2-large-v1"
+revision = "d7aa8a2850d175a9227ff80358ea380723d03ad2"
+
+[baselines.gliner2_5-base]
+library = "gliner2"
+model = "fastino/gliner2.5-base-v1"
+revision = "54785d51df8d86a0d8f2eb212fec15871aad2c4d"
+
+[baselines.gliner-v2_5-large]
+library = "gliner"
+model = "gliner-community/gliner_large-v2.5"
+revision = "3d6d1760be1c591069f85f207fced9214df8b15f"
+finetune = true
+
+[baselines.nuner-zero]
+library = "gliner"
+model = "numind/NuNER_Zero"
+revision = "c90187673f464518dca09f41689184ed6976242c"
+finetune = true
+
+[baselines.gliner-biomed-large]
+library = "gliner"
+model = "Ihor/gliner-biomed-large-v1.0"
+revision = "f79771210ab2111a2081ef31620fdb7342f602e9"
+finetune = true

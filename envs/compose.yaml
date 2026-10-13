@@ -1,0 +1,49 @@
+# Containers for the two environments that cannot share the core's dependencies.
+# Run from the repository root:
+#
+#   MODEL=Qwen/Qwen3.5-0.8B REVISION=<hf-sha> docker compose -f envs/compose.yaml up serve
+#   docker compose -f envs/compose.yaml run --rm baselines predict gliner2-large
+#   docker compose -f envs/compose.yaml run --rm baselines finetune nuner-zero -d crossner_ai
+#
+# `serve` exposes the same OpenAI-compatible API the core client uses for OpenRouter, at
+# http://127.0.0.1:8000/v1 (llm.local_url in trice.toml). HF_TOKEN comes from the environment.
+services:
+  serve:
+    image: vllm/vllm-openai:v0.31.0
+    # The image's entrypoint is `vllm serve`; bf16 weights, one pinned revision, and
+    # --generation-config vllm so only the parameters the client sends apply (not the model's
+    # generation_config.json defaults). VLLM_BATCH_INVARIANT makes outputs independent of batching.
+    command: ["${MODEL:?model repo}", "--revision", "${REVISION:?pinned HF revision}", "--dtype", "bfloat16", "--seed", "0", "--generation-config", "vllm", "--port", "8000"]
+    environment:
+      VLLM_BATCH_INVARIANT: "1"
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    ipc: host
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  baselines:
+    build: baselines
+    profiles: [baselines]
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ..:/work
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

@@ -4,28 +4,36 @@ from diskcache import Cache
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from trice.core.encoders import ApiClient
-from trice.llm import LLM, Endpoint, OpenAITransport, Pinner
-from trice.schema import Prompt
+from trice.config import ModelSpec
+from trice.core.encoders import ApiClient, EmbeddingRequest, EmbeddingResponse
+from trice.llm import LLM, ChatRequest, Endpoint, ExtraBody, OpenAITransport, Pinner
+from trice.schema import Completion, Message, Prompt
 
-PROMPT = Prompt(messages=[{"role": "user", "content": "hi"}], response_format={"type": "json_schema"}, stop=["\nX"])
+PROMPT = Prompt(messages=[Message(role="user", content="hi")], response_format={"type": "json_schema"}, stop=["\nX"])
 PINNED = Endpoint(
-    backend="openrouter", model="qwen/qwen3.5-9b", provider="DeepInfra", quantization="bf16", thinking=True
+    name="qwen3.5-9b",
+    backend="openrouter",
+    model="qwen/qwen3.5-9b",
+    provider="DeepInfra",
+    quantization="bf16",
+    thinking=True,
 )
 
 
 class Recording(BaseModel):
     """Answers locally and records what would have been sent."""
 
-    sent: list[dict] = Field(default_factory=list)
+    sent: list[ChatRequest] = Field(default_factory=list)
 
-    def send(self, request: dict) -> dict:
+    def send(self, request: ChatRequest) -> Completion:
         self.sent.append(request)
-        return {
-            "choices": [{"message": {"content": f"answer {len(self.sent)}"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-            "provider": "DeepInfra",
-        }
+        return Completion(
+            text=f"answer {len(self.sent)}",
+            finish_reason="stop",
+            prompt_tokens=3,
+            completion_tokens=2,
+            provider="DeepInfra",
+        )
 
 
 @pytest.fixture
@@ -45,7 +53,7 @@ def llm(app, tmp_path, transport):
 
 def test_openrouter_request_pins_routing_and_disables_thinking(llm):
     request = llm().render_request(PROMPT)
-    assert request["extra_body"] == {
+    assert request.extra_body.model_dump(exclude_none=True) == {
         "provider": {
             "order": ["DeepInfra"],
             "allow_fallbacks": False,
@@ -54,9 +62,11 @@ def test_openrouter_request_pins_routing_and_disables_thinking(llm):
         },
         "reasoning": {"enabled": False},
     }
-    assert (request["temperature"], request["seed"], request["stop"]) == (0.0, 0, ["\nX"])
-    local = llm(endpoint=Endpoint(backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True)).render_request(PROMPT)
-    assert local["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert (request.temperature, request.seed, request.stop) == (0.0, 0, ["\nX"])
+    local = llm(endpoint=Endpoint(name="q", backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True)).render_request(
+        PROMPT
+    )
+    assert local.extra_body.model_dump(exclude_none=True) == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_record_replay_and_audit(llm, transport):
@@ -70,29 +80,6 @@ def test_record_replay_and_audit(llm, transport):
     audit.complete(PROMPT, audit_tag="day1")
     assert len(transport.sent) == 2  # always a live call, stored under the audit tag only
     assert writer.complete(PROMPT) == first and len(transport.sent) == 2
-
-
-def test_pinner_prefers_precision_then_price(app):
-    pinner = Pinner(client=OpenAI(base_url="http://unused", api_key="x"), config=app.config.llm)
-    params = [*app.config.llm.required_parameters, "reasoning"]
-
-    def endpoint(name: str, quant: str, price: float, supported: list[str] = params) -> dict:
-        return {
-            "provider_name": name,
-            "quantization": quant,
-            "pricing": {"prompt": price, "completion": 1e-6},
-            "supported_parameters": supported,
-        }
-
-    choice = pinner.choose_endpoint(
-        [endpoint("Cheap", "fp8", 1e-8), endpoint("A", "bf16", 5e-8), endpoint("B", "bf16", 3e-8)], thinking=True
-    )
-    assert choice["provider_name"] == "B"
-    assert pinner.choose_endpoint([endpoint("NoSchema", "bf16", 1e-9, ["temperature"])], thinking=False) is None
-
-
-REQ = {"model": "m", "messages": []}
-OK = {"id": "x", "object": "chat.completion", "created": 0, "model": "m", "choices": []}
 
 
 class Network:
@@ -113,6 +100,44 @@ class Network:
         )
 
 
+def test_pinner_prefers_precision_then_price(app):
+    params = [*app.config.llm.required_parameters, "reasoning"]
+
+    def endpoint(name: str, quant: str, price: float, supported: list[str] = params) -> dict:
+        return {
+            "provider_name": name,
+            "quantization": quant,
+            "pricing": {"prompt": price, "completion": 1e-6},
+            "supported_parameters": supported,
+        }
+
+    spec = ModelSpec(openrouter="q/m", hf_repo="Q/M", ladder="t", params_b=1, active_params_b=1, thinking=True)
+    listing = [endpoint("Cheap", "fp8", 1e-8), endpoint("A", "bf16", 5e-8), endpoint("B", "bf16", 3e-8)]
+    pinner = Pinner(client=Network({"data": {"endpoints": listing}}).client, config=app.config.llm)
+    assert pinner.pin("m", spec, "rev").provider == "B"
+    unsupported = Network({"data": {"endpoints": [endpoint("NoSchema", "bf16", 1e-9, ["temperature"])]}})
+    pinner = Pinner(client=unsupported.client, config=app.config.llm)
+    assert pinner.pin("m", spec, "rev").backend == "local"  # no provider supports every parameter
+
+
+REQ = ChatRequest(
+    model="m",
+    messages=[Message(role="user", content="hi")],
+    temperature=0.0,
+    top_p=1.0,
+    seed=0,
+    max_tokens=8,
+    extra_body=ExtraBody(),
+)
+OK = {
+    "id": "x",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "m",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+}
+
+
 def test_allow_spend_defaults_to_false(app):
     assert app.config.llm.allow_spend is False
 
@@ -126,36 +151,35 @@ def test_openrouter_transport_blocked_without_allow_spend():
 
 def test_local_transport_allowed_without_allow_spend():
     net = Network(OK)
-    assert OpenAITransport(client=net.client, backend="local").send(REQ)["id"] == OK["id"]
+    assert OpenAITransport(client=net.client, backend="local").send(REQ).text == "ok"
 
 
 def test_openrouter_transport_allowed_when_enabled():
     net = Network(OK)
-    assert OpenAITransport(client=net.client, backend="openrouter", allow_spend=True).send(REQ)["id"] == OK["id"]
+    assert OpenAITransport(client=net.client, backend="openrouter", allow_spend=True).send(REQ).text == "ok"
 
 
 def test_api_client_blocks_misses_but_replays_cache(tmp_path):
-    net, cache = Network({"data": 1}), Cache(tmp_path / "api")
-    api = ApiClient(client=net.client, cache=cache)
+    net, cache = Network({"data": [{"index": 0, "embedding": [1.0]}]}), Cache(tmp_path / "api")
+    api, body = ApiClient(client=net.client, cache=cache), EmbeddingRequest(model="m", input=["a"])
     with pytest.raises(PermissionError):
-        api.post("/embeddings", {"input": ["a"]})
+        api.post("/embeddings", body, EmbeddingResponse)
     assert net.calls == 0
-    ApiClient(client=net.client, cache=cache, allow_spend=True).post("/embeddings", {"input": ["a"]})
+    ApiClient(client=net.client, cache=cache, allow_spend=True).post("/embeddings", body, EmbeddingResponse)
     assert net.calls == 1
-    assert api.post("/embeddings", {"input": ["a"]}) == {"data": 1}  # replay needs no permission
+    assert api.post("/embeddings", body, EmbeddingResponse).data[0].embedding == [1.0]  # replay needs no permission
     assert net.calls == 1
 
 
 def test_llm_replays_openrouter_cache_without_allow_spend(app, tmp_path):
     cache, net = Cache(tmp_path / "llm"), Network(OK)
-    transport = OpenAITransport(client=net.client, backend="openrouter")
-    live = LLM(endpoint=PINNED, transport=transport, cache=cache, config=app.config.llm)
+    blocked = OpenAITransport(client=net.client, backend="openrouter")
+    live = LLM(endpoint=PINNED, transport=blocked, cache=cache, config=app.config.llm)
     with pytest.raises(PermissionError):
         live.complete(PROMPT)
-    cache[live.hash_request(live.render_request(PROMPT))] = {
-        "choices": [{"message": {"content": "cached"}, "finish_reason": "stop"}]
-    }
-    assert live.complete(PROMPT).text == "cached"
+    recorded = Recording()
+    primed = LLM(endpoint=PINNED, transport=recorded, cache=cache, config=app.config.llm).complete(PROMPT)
+    assert live.complete(PROMPT) == primed and len(recorded.sent) == 1
     assert net.calls == 0
 
 
@@ -170,5 +194,5 @@ def test_pinner_falls_back_to_local_when_model_not_on_openrouter(app):
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     spec = app.config.models["qwen3.5-2b"]
-    pin = Pinner(client=client, config=app.config.llm).pin(spec, "abc")
+    pin = Pinner(client=client, config=app.config.llm).pin("qwen3.5-2b", spec, "abc")
     assert (pin.backend, pin.model, pin.hf_revision) == ("local", spec.hf_repo, "abc")

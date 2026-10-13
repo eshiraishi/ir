@@ -8,9 +8,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from trice.schema import Condition, Example, derive_seed
-
-Ranking = dict[str, list[str]]  # stage -> pool ids, best first
+from trice.schema import Condition, Example, Ranking, derive_seed
 
 
 @runtime_checkable
@@ -25,6 +23,15 @@ class Reranker(Protocol):
     def score_pairs(self, query: str, docs: list[str]) -> np.ndarray: ...
 
 
+class Stage(BaseModel):
+    """A first-stage scorer and the name its rankings are stored under."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    name: str
+    scorer: Scorer
+
+
 class Retriever(BaseModel):
     """Stages ``sparse``/``dense``/... (full-pool scores), ``rrf`` (exact RRF over full-pool ranks)
     and ``full`` (reranker over the top fused candidates). A single first stage is stored as
@@ -32,7 +39,7 @@ class Retriever(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    stages: dict[str, Scorer]
+    stages: list[Stage]
     reranker: Reranker | None = None
     rrf_k: int
     rerank_depth: int
@@ -47,33 +54,36 @@ class Retriever(BaseModel):
         pool = sorted(pool, key=lambda e: e.id)
         ids = np.array([e.id for e in pool])
         texts = [e.text for e in pool]
-        matrices = {name: s.score([q.text for q in queries], texts) for name, s in self.stages.items()}
-        rankings = []
+        matrices = [(s.name, s.scorer.score([q.text for q in queries], texts)) for s in self.stages]
+        rankings: list[Ranking] = []
         for qi, query in enumerate(queries):
             keep = np.array([not (loo and (e.id == query.id or e.text == query.text)) for e in pool])
             kept = np.flatnonzero(keep)
-            ranking, rrf = {}, np.zeros(len(kept))
-            for name, matrix in matrices.items():
+            stages, rrf = [], np.zeros(len(kept))
+            for name, matrix in matrices:
                 order = self.order(matrix[qi][kept], ids[kept])
-                ranking[name] = ids[kept][order][: self.store_depth].tolist()
+                stages.append(Ranking(query_id=query.id, stage=name, ids=ids[kept][order][: self.store_depth].tolist()))
                 ranks = np.empty(len(kept))
                 ranks[order] = np.arange(1, len(kept) + 1)
                 rrf += 1.0 / (self.rrf_k + ranks)
             if len(matrices) == 1:
-                ranking = {"full": next(iter(ranking.values()))}
+                stages = [stages[0].model_copy(update={"stage": "full"})]
             else:
                 fused = self.order(rrf, ids[kept])
-                ranking["rrf"] = ids[kept][fused][: self.store_depth].tolist()
+                stages.append(
+                    Ranking(query_id=query.id, stage="rrf", ids=ids[kept][fused][: self.store_depth].tolist())
+                )
                 if self.reranker:
                     cand = kept[fused[: self.rerank_depth]]
                     scores = self.reranker.score_pairs(query.text, [texts[i] for i in cand])
-                    ranking["full"] = ids[cand][self.order(scores, ids[cand])][: self.store_depth].tolist()
-            rankings.append(ranking)
+                    reranked = ids[cand][self.order(scores, ids[cand])][: self.store_depth].tolist()
+                    stages.append(Ranking(query_id=query.id, stage="full", ids=reranked))
+            rankings += stages
         return rankings
 
 
 def select_demonstrations(
-    condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranking: Ranking | None
+    condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranked: list[str] | None
 ) -> list[Example]:
     """The k demonstrations for one query, shuffled with the per-query seed so their order never
     carries rank or dataset order."""
@@ -85,7 +95,7 @@ def select_demonstrations(
         rng = np.random.default_rng(derive_seed("random", condition.seed, dataset, query.id))
         chosen = rng.choice(ids, size=k, replace=False).tolist()
     else:
-        chosen = (ranking or {})[condition.stage][:k]
+        chosen = (ranked or [])[:k]
         if len(chosen) < k:
             raise ValueError(f"{dataset}/{query.id}: only {len(chosen)} candidates for k={k}")
     rng = np.random.default_rng(derive_seed("order", dataset, query.id))

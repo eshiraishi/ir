@@ -2,7 +2,6 @@
 tables and TikZ figures -> byte-identical replay -> budget. The LLM is an oracle that answers
 correctly only when given at least two demonstrations, so k* has a known knee."""
 
-import json
 import tomllib
 from pathlib import Path
 
@@ -15,8 +14,9 @@ from trice.budget import TokenCounter
 from trice.compose import compose
 from trice.config import Config
 from trice.core.formats import Format
-from trice.core.retrieval import Retriever
-from trice.schema import Example, FormatName, LabelMap
+from trice.core.retrieval import Retriever, Stage
+from trice.llm import ChatRequest, Endpoint, EndpointTable
+from trice.schema import Completion, Example, FormatName, LabelMap
 
 NAMES = ["Alice", "Bruno", "Carla", "Diego", "Elena", "Fabio", "Gina", "Hugo", "Iris", "Joao"]
 CITIES = ["Paris", "Lima", "Oslo", "Quito", "Rome", "Seoul", "Tokyo", "Accra"]
@@ -52,20 +52,20 @@ class Oracle:
         self.formats: dict[FormatName, Format] = {}
         self.gold: dict[str, Example] = {}
 
-    def send(self, request: dict) -> dict:
-        messages = request["messages"]
-        if messages[0]["role"] == "system":
-            system = messages[0]["content"]
-            fmt = "P2" if "response_format" in request else "P3" if "repeating" in system else "P1"
-            query, demos = messages[-1]["content"], (len(messages) - 2) // 2
+    def send(self, request: ChatRequest) -> Completion:
+        messages = request.messages
+        if messages[0].role == "system":
+            fmt = "P2" if request.response_format else "P3" if "repeating" in messages[0].content else "P1"
+            query, demos = messages[-1].content, (len(messages) - 2) // 2
         else:
-            content = messages[0]["content"]
+            content = messages[0].content
             fmt, demos = "P0", content.count("\nExample ") - 1
             query = content.rsplit("\nExample ", 1)[1].split(": ", 1)[1].removesuffix("\nAnswer:")
         example = self.gold[query]
         shown = example if demos >= 2 else example.model_copy(update={"tags": ["O"] * len(example.tokens)})
-        text = self.formats[fmt].render_answer(LabelMap(LABELS), shown)
-        return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}], "provider": "P"}
+        return Completion(
+            text=self.formats[fmt].render_answer(LabelMap(LABELS), shown), finish_reason="stop", provider="P"
+        )
 
 
 class WordTokenizer:
@@ -88,13 +88,16 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config["stats"]["resamples"] = 500
     (tmp_path / "trice.toml").write_text(tomli_w.dumps(config))
     monkeypatch.chdir(tmp_path)
-    endpoints = {"backend": "openrouter", "model": "x", "provider": "P", "prompt_price": 1e-7, "completion_price": 2e-7}
-    (tmp_path / "results").mkdir()
-    (tmp_path / "results" / "endpoints.json").write_text(json.dumps({m: endpoints for m in config["models"]}))
+    layout = Config().layout
+    endpoints = [
+        Endpoint(name=m, backend="openrouter", model="x", provider="P", prompt_price=1e-7, completion_price=2e-7)
+        for m in config["models"]
+    ]
+    layout.endpoints.prepare().write_text(EndpointTable(endpoints).model_dump_json())
     for offset, name in enumerate(("toy_a", "toy_b")):
         splits = {"train": sentences(name, "train", 30, 10 * offset), "test": sentences(name, "test", 12, 100 + offset)}
         DatasetDict({s: Dataset.from_list([e.model_dump() for e in rows]) for s, rows in splits.items()}).save_to_disk(
-            tmp_path / "data" / "canonical" / name
+            layout.canonical.fill(dataset=name)
         )
     return tmp_path
 
@@ -102,7 +105,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_full_pipeline(project: Path) -> None:
     oracle = Oracle()
     retriever = Retriever(
-        stages={"sparse": Overlap(), "dense": Overlap()},
+        stages=[Stage(name="sparse", scorer=Overlap()), Stage(name="dense", scorer=Overlap())],
         reranker=OverlapReranker(),
         rrf_k=60,
         rerank_depth=200,
@@ -129,24 +132,26 @@ def test_full_pipeline(project: Path) -> None:
         assert {r.k for r in loo} == {0, 1, 2, 4, 8, 16}  # grid capped by the 30-sentence pool
         for run in loo:
             runner.execute(run, app.llms[run.model])
-        assert runner.select_k()["m1"]["toy_a"]["k_star"] == 2
+        assert runner.select_k().find("m1", "toy_a").selection.k_star == 2
 
         for run in runner.expand_plan("S1"):
             runner.execute(run, app.llms[run.model])
         assert app.analyzer.run_all() == ["S1", "S5"]
-        tables = project / "results" / "tables"
-        assert (tables / "S1.tex").exists() and "\\begin{tikzpicture}" in (tables / "S5-scaling.tex").read_text()
-        assert '"delta": 1.0' in (tables / "S1-vs-zero_shot.json").read_text()
+        tables = app.config.layout.tables
+        assert tables.fill(name="S1", suffix="tex").exists()
+        assert "\\begin{tikzpicture}" in tables.fill(name="S5-scaling", suffix="tex").read_text()
+        assert '"delta": 1.0' in tables.fill(name="S1-vs-zero_shot", suffix="json").read_text()
 
-        runs = sorted((project / "results" / "runs").rglob("*.jsonl"))
+        layout = app.config.layout
+        runs = layout.runs.match(slug="**/*")
         before = [p.read_bytes() for p in runs]
-        assert not list((project / "results" / "runs").rglob("*.partial"))
+        assert not layout.runs_partial.match(slug="**/*")
         for p in runs:
             p.unlink()
         for study in ("S0", "S1-loo", "S1"):
             for run in runner.expand_plan(study):
                 runner.execute(run, app.llms[run.model].model_copy(update={"mode": "replay"}))
-        assert [p.read_bytes() for p in sorted((project / "results" / "runs").rglob("*.jsonl"))] == before
+        assert [p.read_bytes() for p in layout.runs.match(slug="**/*")] == before
 
         budget = app.budget.model_copy(
             update={"counters": {m: TokenCounter(tokenizer=WordTokenizer()) for m in app.config.models}}
@@ -155,8 +160,8 @@ def test_full_pipeline(project: Path) -> None:
         distinct = {
             (r.model, p.model_dump_json()) for r in runner.expand_plan("S1") for _, p in runner.render_prompts(r)
         }
-        assert payload["total"]["calls"] == len(distinct) and payload["max_error"] == 0.0  # repeats are priced once
-        assert payload["total"]["cost"] > 0  # priced with the pinned endpoints
+        assert payload.total.calls == len(distinct) and payload.max_error == 0.0  # repeats are priced once
+        assert payload.total.cost > 0  # priced with the pinned endpoints
         assert "| S1 |" in budget.render(payload)
 
 
@@ -169,4 +174,4 @@ def test_failed_run_leaves_no_partial_result(project: Path) -> None:
         run = app.runner.expand_plan("S0", assume_format="P0")[0].model_copy(update={"condition": "zero_shot", "k": 0})
         with pytest.raises(RuntimeError):
             app.runner.execute(run, Failing())
-        assert not list((project / "results" / "runs").rglob("*.jsonl"))
+        assert not app.config.layout.runs.match(slug="**/*")

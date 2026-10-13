@@ -2,9 +2,8 @@
 
 import json
 import math
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from pathlib import Path
 
 import matplot2tikz
 import matplotlib.pyplot as plt
@@ -16,31 +15,24 @@ from matplotlib.axes import Axes
 from pydantic import BaseModel, ConfigDict
 
 from trice.evaluation.inference import Friedman
-from trice.schema import write_text
-
-
-def format_cell(value: object) -> str:
-    return f"{value:.4f}" if isinstance(value, float) else str(value)
-
-
-def escape_latex(value: object) -> str:
-    return "".join("\\" + c if c in "&%$#_{}" else c for c in str(value))
+from trice.schema import PathTemplate
 
 
 class Reporter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     env: Environment
-    out: Path
+    tables: PathTemplate
 
-    def write_table(self, name: str, rows: list[dict], caption: str) -> None:
-        columns = list(rows[0]) if rows else []
-        for kind in ("md", "tex"):
-            text = self.env.get_template(f"table.{kind}.j2").render(
-                name=name, caption=caption, columns=columns, rows=rows
+    def write_table(self, name: str, rows: Sequence[BaseModel], caption: str) -> None:
+        records = [r.model_dump(mode="json") for r in rows]
+        columns = list(records[0]) if records else []
+        for suffix in ("md", "tex"):
+            text = self.env.get_template(f"table.{suffix}.j2").render(
+                name=name, caption=caption, columns=columns, rows=records
             )
-            write_text(self.out / f"{name}.{kind}", text)
-        write_text(self.out / f"{name}.json", json.dumps(rows, indent=2) + "\n")
+            self.tables.prepare(name=name, suffix=suffix).write_text(text)
+        self.tables.prepare(name=name, suffix="json").write_text(json.dumps(records, indent=2) + "\n")
 
     @contextmanager
     def figure(self, name: str, panels: int = 1, size: tuple[float, float] = (4.0, 3.0)) -> Generator[list[Axes]]:
@@ -50,13 +42,15 @@ class Reporter(BaseModel):
         figure = plt.figure(figsize=(size[0] * columns, size[1] * rows))
         try:
             yield [figure.add_subplot(rows, columns, i + 1) for i in range(panels)]
-            self.out.mkdir(parents=True, exist_ok=True)
-            figure.savefig(self.out / f"{name}.pdf", bbox_inches="tight")
-            matplot2tikz.save(self.out / f"{name}.tex", figure=figure)
+            figure.savefig(self.tables.prepare(name=name, suffix="pdf"), bbox_inches="tight")
+            matplot2tikz.save(self.tables.prepare(name=name, suffix="tex"), figure=figure)
         finally:
             plt.close(figure)
 
-    def plot_lines(self, name: str, data: pd.DataFrame, x: str, y: str, hue: str, col: str | None = None) -> None:
+    def plot_lines(
+        self, name: str, points: Sequence[BaseModel], x: str, y: str, hue: str, col: str | None = None
+    ) -> None:
+        data = pd.DataFrame([p.model_dump() for p in points])
         facets = sorted(data[col].unique()) if col else [None]
         with self.figure(name, panels=len(facets)) as axes:
             for i, (ax, facet) in enumerate(zip(axes, facets, strict=True)):
@@ -67,4 +61,4 @@ class Reporter(BaseModel):
 
     def plot_critical_difference(self, name: str, friedman: Friedman) -> None:
         with self.figure(name, size=(6.0, 2.0)) as (ax,):
-            sp.critical_difference_diagram(pd.Series(friedman.mean_ranks), pd.DataFrame(friedman.nemenyi), ax=ax)
+            sp.critical_difference_diagram(friedman.mean_ranks, friedman.nemenyi, ax=ax)

@@ -3,7 +3,6 @@
 Order of use: data -> rank -> pin -> smoke -> budget -> run S0 -> select-format -> run S1-loo
 -> select-k -> run S1..S6 -> audit / probe -> analyze."""
 
-import json
 from typing import Annotated, Literal
 
 import typer
@@ -11,7 +10,8 @@ from huggingface_hub import HfApi
 
 from trice.compose import App, compose
 from trice.config import Config
-from trice.schema import FormatName, write_text
+from trice.llm import Endpoint, EndpointTable
+from trice.schema import FormatName
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 Datasets = Annotated[list[str] | None, typer.Option("--dataset", "-d")]
@@ -42,25 +42,24 @@ def rank(
 ) -> None:
     """Compute and store rankings once; later stages only read them."""
     trice: App = ctx.obj
-    names = (datasets or list(trice.config.datasets)) + (
+    for name in (datasets or list(trice.config.datasets)) + (
         [f"conll2003@{n}" for n in trice.config.selection.pool_sizes] if pools else []
-    )
-    for name in names:
+    ):
         for qs in ("test", "loo") if queries == "both" else (queries,):
-            digest = trice.runner.store_rankings(stack, trice.retrievers[stack], name, qs)
-            typer.echo(f"{stack}/{name}/{qs}: {digest}")
+            typer.echo(f"{stack}/{name}/{qs}: {trice.runner.store_rankings(stack, trice.retrievers[stack], name, qs)}")
 
 
 @app.command()
 def pin(ctx: typer.Context, models: Models = None) -> None:
     """Pin one OpenRouter provider per model (or local vLLM) and the tokenizer revision."""
     trice: App = ctx.obj
-    pins = {name: endpoint.model_dump() for name, endpoint in trice.endpoints.items()}
+    pinned: list[Endpoint] = []
     for name, spec in trice.config.models.items():
         if not models or name in models:
-            pins[name] = trice.pinner.pin(spec, HfApi().model_info(spec.hf_repo).sha).model_dump()
-            typer.echo(f"{name}: {pins[name]['backend']} {pins[name]['provider']} {pins[name]['quantization']}")
-    write_text(trice.config.layout.endpoints, json.dumps(pins, indent=2) + "\n")
+            pinned.append(trice.pinner.pin(name, spec, HfApi().model_info(spec.hf_repo).sha))
+            typer.echo(f"{name}: {pinned[-1].backend} {pinned[-1].provider} {pinned[-1].quantization}")
+    kept = [e for e in trice.endpoints if e.name not in {p.name for p in pinned}]
+    trice.config.layout.endpoints.prepare().write_text(EndpointTable([*kept, *pinned]).model_dump_json(indent=2))
 
 
 @app.command()
@@ -68,8 +67,8 @@ def smoke(ctx: typer.Context, model: str) -> None:
     """Check one model end to end; exits non-zero if any check fails."""
     trice: App = ctx.obj
     checks = trice.runner.run_smoke(trice.llms[model].model_copy(update={"mode": "bypass"}))
-    typer.echo(json.dumps(checks, indent=2))
-    raise typer.Exit(0 if all(all(v.values()) for v in checks.values()) else 1)
+    typer.echo("[" + ",".join(c.model_dump_json() for c in checks) + "]")
+    raise typer.Exit(0 if all(c.answered and c.parses and c.no_thinking and c.pinned for c in checks) else 1)
 
 
 @app.command()
@@ -82,9 +81,9 @@ def budget(
     """Dry run: count every planned prompt with each model's tokenizer and price it. No calls."""
     trice: App = ctx.obj
     for assumed in k:
-        payload = trice.budget.estimate(studies or list(trice.config.studies), assumed, fmt)
-        write_text(trice.config.layout.budget / f"k{assumed}-{fmt}.json", json.dumps(payload, indent=2) + "\n")
-        typer.echo(trice.budget.render(payload))
+        report = trice.budget.estimate(studies or list(trice.config.studies), assumed, fmt)
+        trice.config.layout.budget.prepare(k=assumed, format=fmt).write_text(report.model_dump_json(indent=2))
+        typer.echo(trice.budget.render(report))
 
 
 @app.command()
@@ -112,23 +111,24 @@ def select_format(ctx: typer.Context) -> None:
 @app.command("select-k")
 def select_k(ctx: typer.Context, study: str = "S1-loo") -> None:
     """Choose k* per (model, dataset) from the train-LOO curves."""
-    for model, by_dataset in ctx.obj.runner.select_k(study).items():
-        typer.echo(f"{model}: " + ", ".join(f"{d}={v['k_star']}" for d, v in by_dataset.items()))
+    for choice in ctx.obj.runner.select_k(study).root:
+        typer.echo(f"{choice.model} {choice.dataset}: k*={choice.selection.k_star} ({choice.selection.rule})")
 
 
 @app.command()
 def audit(ctx: typer.Context, model: str, tag: str) -> None:
     """S7: resend the fixed audit prompts live (repeat with a new tag on different days)."""
     trice: App = ctx.obj
-    llm = trice.llms[model].model_copy(update={"mode": "bypass"})
-    typer.echo(json.dumps(trice.runner.audit(model, llm, tag), indent=2))
+    audited = trice.runner.audit(model, trice.llms[model].model_copy(update={"mode": "bypass"}), tag)
+    typer.echo(audited.model_dump_json(indent=2))
 
 
 @app.command()
 def probe(ctx: typer.Context, model: str) -> None:
     """S8: memorization probe on the opening lines of every raw test file."""
     trice: App = ctx.obj
-    typer.echo(json.dumps(trice.runner.probe(model, trice.llms[model]), indent=2))
+    for score in trice.runner.probe(model, trice.llms[model]):
+        typer.echo(f"{score.dataset}: {score.share:.3f}")
 
 
 @app.command()
@@ -141,4 +141,4 @@ def analyze(ctx: typer.Context) -> None:
 def baselines(ctx: typer.Context) -> None:
     """Score the specialist baselines written by envs/baselines."""
     for row in ctx.obj.analyzer.score_baselines():
-        typer.echo(f"{row['system']} {row['dataset']}: {row['f1']:.4f}")
+        typer.echo(f"{row.system} {row.dataset}: {row.f1:.4f}")
