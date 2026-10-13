@@ -1,14 +1,15 @@
 {#- A results table for the paper (booktabs). -#}
+{%- from "cells.j2" import tex -%}
 \begin{table}[t]
 \centering
 \caption{ {{- caption -}} }
 \label{tab:{{ name }}}
 \begin{tabular}{ {{- "l" * (columns | length) -}} }
 \toprule
-{{ columns | map("latex") | join(" & ") }} \\
+{% for c in columns %}{{ tex(c) }}{% if not loop.last %} & {% endif %}{% endfor %} \\
 \midrule
 {% for row in rows -%}
-{% for c in columns %}{{ row[c] | cell | latex }}{% if not loop.last %} & {% endif %}{% endfor %} \\
+{% for c in columns %}{{ tex(row[c]) }}{% if not loop.last %} & {% endif %}{% endfor %} \\
 {% endfor -%}
 \bottomrule
 \end{tabular}

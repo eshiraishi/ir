@@ -3,9 +3,9 @@
 import hashlib
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 from seqeval.metrics.sequence_labeling import get_entities
 
 Split = Literal["train", "test"]
@@ -16,35 +16,37 @@ Mode = Literal["readwrite", "replay", "bypass"]
 Span = tuple[str, int, int]  # (raw label, first token, last token + 1)
 
 
+def ensure_parent(path: str) -> str:
+    """The same path, once its directory exists (for writers that do not create it)."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_text(path: str, text: str) -> None:
+    Path(ensure_parent(path)).write_text(text)
+
+
 def derive_seed(*parts: object) -> int:
     """A 32-bit seed that depends only on what it is for, never on call order."""
     return int(hashlib.sha256("|".join(map(str, parts)).encode()).hexdigest()[:8], 16)
 
 
-class PathTemplate(RootModel[str]):
-    """A relative path with ``{placeholders}``, as written in the [layout] of trice.toml. Every file
-    the pipeline reads or writes is named by one, so no path is built anywhere else."""
+class LocalRef(BaseModel):
+    """A Hugging Face model run here, pinned to a commit."""
 
-    model_config = ConfigDict(frozen=True)
-
-    def fill(self, **fields: object) -> Path:
-        return Path(self.root.format(**fields))
-
-    def prepare(self, **fields: object) -> Path:
-        """The path to write to, with its directory created."""
-        path = self.fill(**fields)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def match(self, **fields: object) -> list[Path]:
-        """Existing files; a field set to ``*`` acts as a glob wildcard."""
-        return sorted(Path().glob(self.root.format(**fields)))
-
-
-class ModelRef(BaseModel):
+    backend: Literal["local"]
     id: str
-    revision: str | None = None
-    backend: Backend = "local"
+    revision: str
+
+
+class HostedRef(BaseModel):
+    """A model served by OpenRouter."""
+
+    backend: Literal["openrouter"]
+    id: str
+
+
+ModelRef = Annotated[LocalRef | HostedRef, Field(discriminator="backend")]
 
 
 class Runtime(BaseModel):
@@ -73,6 +75,24 @@ class Example(BaseModel):
         return [(label, start, end + 1) for label, start, end in get_entities(self.tags)]
 
 
+class Entity(BaseModel):
+    text: str
+    type: str
+
+
+class Segment(BaseModel):
+    text: str
+    tag: str  # "" for a plain token
+
+
+class Description(BaseModel):
+    """What the templates need to show one example and its gold answer."""
+
+    text: str
+    mentions: list[Entity]
+    segments: list[Segment]
+
+
 class LabelMap(RootModel[dict[str, str]]):
     """Raw dataset labels and the verbalizations shown to models (one-to-one)."""
 
@@ -94,17 +114,21 @@ class LabelMap(RootModel[dict[str, str]]):
                 return raw
         return None
 
-    def describe(self, example: Example) -> dict:
-        """What the templates need to show one example and its gold answer."""
-        mentions, segments, pos = [], [], 0
+    def describe(self, example: Example) -> Description:
+        mentions = []
+        segments = []
+        pos = 0
         for raw, start, end in example.spans:
-            text, verbal = " ".join(example.tokens[start:end]), self.root[raw]
-            mentions.append({"text": text, "type": verbal})
-            segments += [{"text": t, "tag": ""} for t in example.tokens[pos:start]]
-            segments.append({"text": text, "tag": self.tag(verbal)})
+            text = " ".join(example.tokens[start:end])
+            verbal = self.root[raw]
+            mentions.append(Entity(text=text, type=verbal))
+            for token in example.tokens[pos:start]:
+                segments.append(Segment(text=token, tag=""))
+            segments.append(Segment(text=text, tag=self.tag(verbal)))
             pos = end
-        segments += [{"text": t, "tag": ""} for t in example.tokens[pos:]]
-        return {"text": example.text, "mentions": mentions, "segments": segments}
+        for token in example.tokens[pos:]:
+            segments.append(Segment(text=token, tag=""))
+        return Description(text=example.text, mentions=mentions, segments=segments)
 
 
 class Condition(BaseModel):
@@ -182,7 +206,8 @@ class Parsed(BaseModel):
     malformed: bool
 
 
-class Prediction(Parsed):
+class Prediction(BaseModel):
     query_id: str
     output: str
     completion: Completion
+    parsed: Parsed

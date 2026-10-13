@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 from conftest import example
@@ -60,7 +62,7 @@ def test_parse_counts_invalid_mentions(app, labels):
 @pytest.mark.parametrize("dataset", ["crossner_ai", "crossner_music", "conll2003", "wnut17", "ncbi_disease"])
 def test_roundtrip_on_real_data(app, dataset):
     """P3 carries positions and is exact; list/JSON formats can only miss repeated surface forms."""
-    if not app.config.layout.canonical.fill(dataset=dataset).exists():
+    if not Path(app.config.layout.canonical.format(dataset=dataset)).exists():
         pytest.skip("run `trice data` first")
     labels, examples = app.corpus.load_labels(dataset), app.corpus.load(dataset, "train")[:1500]
     for fmt, format in app.formats.items():

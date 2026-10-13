@@ -51,13 +51,13 @@ batch_size = 32
 
 [retrieval.stacks.small]   # default: every model < 1B, Apache-2.0, CPU-feasible
 kind = "trice"
-sparse = { id = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte" }
-dense = { id = "Qwen/Qwen3-Embedding-0.6B" }
-reranker = { id = "Qwen/Qwen3-Reranker-0.6B" }
+sparse = { backend = "local", id = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte", revision = "1646fef40807937e8e130c66d327a26421c408d5" }
+dense = { backend = "local", id = "Qwen/Qwen3-Embedding-0.6B", revision = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3" }
+reranker = { backend = "local", id = "Qwen/Qwen3-Reranker-0.6B", revision = "e61197ed45024b0ed8a2d74b80b4d909f1255473" }
 
 [retrieval.stacks.large]   # S2 ablation through OpenRouter
 kind = "trice"
-sparse = { id = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte" }
+sparse = { backend = "local", id = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte", revision = "1646fef40807937e8e130c66d327a26421c408d5" }
 dense = { id = "qwen/qwen3-embedding-8b", backend = "openrouter" }
 reranker = { id = "qwen/qwen3-reranker-8b", backend = "openrouter" }
 
@@ -68,7 +68,7 @@ b = 0.75
 
 [retrieval.stacks.v1_dense] # v1 replica: bge-large with v1's query instruction
 kind = "dense"
-dense = { id = "BAAI/bge-large-en-v1.5" }
+dense = { backend = "local", id = "BAAI/bge-large-en-v1.5", revision = "d4aa6901d3a41ba39fb536a557fa166f842b0e09" }
 query_instruction = "Represent this sentence for searching relevant passages: "
 
 [selection]

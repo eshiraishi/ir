@@ -2,6 +2,7 @@
 hosted large stack (OpenRouter through the OpenAI client). All run deterministically in fp32."""
 
 import hashlib
+import operator
 from functools import cached_property
 
 import bm25s
@@ -15,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from sentence_transformers import SentenceTransformer, SparseEncoder
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
 
-from trice.schema import Message, ModelRef, Runtime
+from trice.schema import LocalRef, Message, Runtime
 
 
 def fix_determinism(runtime: Runtime) -> None:
@@ -28,7 +29,7 @@ class SparseScorer(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    ref: ModelRef
+    ref: LocalRef
     runtime: Runtime
 
     @cached_property
@@ -50,7 +51,7 @@ class DenseScorer(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    ref: ModelRef
+    ref: LocalRef
     runtime: Runtime
     query_prompt: str | None = None
 
@@ -99,7 +100,7 @@ class QwenReranker(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    ref: ModelRef
+    ref: LocalRef
     runtime: Runtime
     instruction: str
     env: Environment
@@ -107,9 +108,7 @@ class QwenReranker(BaseModel):
 
     @cached_property
     def tokenizer(self) -> PreTrainedTokenizerFast:
-        return PreTrainedTokenizerFast.from_pretrained(
-            self.ref.id, revision=self.ref.revision or "main", padding_side="left"
-        )
+        return PreTrainedTokenizerFast.from_pretrained(self.ref.id, revision=self.ref.revision, padding_side="left")
 
     @cached_property
     def model(self) -> PreTrainedModel:
@@ -135,7 +134,8 @@ class QwenReranker(BaseModel):
             )
             for doc in docs
         ]
-        yes, no = self.tokenizer.convert_tokens_to_ids("yes"), self.tokenizer.convert_tokens_to_ids("no")
+        yes = self.tokenizer.convert_tokens_to_ids("yes")
+        no = self.tokenizer.convert_tokens_to_ids("no")
         scores = []
         for i in range(0, len(texts), self.batch_size):
             batch = self.tokenizer(texts[i : i + self.batch_size], padding=True, return_tensors="pt").to(
@@ -207,7 +207,7 @@ class ApiScorer(BaseModel):
             for i in range(0, len(texts), self.batch_size):
                 body = EmbeddingRequest(model=self.model_id, input=texts[i : i + self.batch_size])
                 response = self.api.post("/embeddings", body, EmbeddingResponse)
-                rows += [r.embedding for r in sorted(response.data, key=lambda r: r.index)]
+                rows += [r.embedding for r in sorted(response.data, key=operator.attrgetter("index"))]
             m = np.asarray(rows)
             return m / np.linalg.norm(m, axis=1, keepdims=True)
 

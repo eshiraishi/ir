@@ -25,7 +25,9 @@ def select_k(f1_by_k: dict[int, float]) -> KSelection:
     iso = IsotonicRegression(increasing=True).fit_transform(np.array(ks, float), f1)
     knee = KneeLocator(ks, iso, S=1.0, curve="concave", direction="increasing").knee if np.ptp(iso) > 0 else None
     if knee is None:
-        k_star, rule = ks[int(np.argmax(iso >= iso.max() - 1e-12))], "isotonic-max"
+        k_star = ks[int(np.argmax(iso >= iso.max() - 1e-12))]
+        rule = "isotonic-max"
     else:
-        k_star, rule = int(knee), "kneedle"
+        k_star = int(knee)
+        rule = "kneedle"
     return KSelection(k_star=k_star, rule=rule, ks=ks, f1=f1.tolist(), f1_isotonic=iso.tolist())

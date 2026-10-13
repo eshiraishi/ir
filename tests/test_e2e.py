@@ -2,6 +2,7 @@
 tables and TikZ figures -> byte-identical replay -> budget. The LLM is an oracle that answers
 correctly only when given at least two demonstrations, so k* has a known knee."""
 
+import glob
 import tomllib
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from trice.config import Config
 from trice.core.formats import Format
 from trice.core.retrieval import Retriever, Stage
 from trice.llm import ChatRequest, Endpoint, EndpointTable
-from trice.schema import Completion, Example, FormatName, LabelMap
+from trice.schema import Completion, Example, FormatName, LabelMap, write_text
 
 NAMES = ["Alice", "Bruno", "Carla", "Diego", "Elena", "Fabio", "Gina", "Hugo", "Iris", "Joao"]
 CITIES = ["Paris", "Lima", "Oslo", "Quito", "Rome", "Seoul", "Tokyo", "Accra"]
@@ -79,25 +80,37 @@ class WordTokenizer:
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config = tomllib.loads((Path(__file__).parents[1] / "trice.toml").read_text())
-    spec = {"source": "none", "train": {"path": "x", "size": 30}, "test": {"path": "y", "size": 12}, "labels": LABELS}
+    spec = {
+        "source": "none",
+        "train": {"path": "x", "size": 30, "sha256": "0"},
+        "test": {"path": "y", "size": 12, "sha256": "0"},
+        "labels": LABELS,
+    }
     config["sources"] = {"none": {"url": "http://unused"}}
     config["datasets"] = {"toy_a": spec, "toy_b": spec}
     model = {"openrouter": "x", "hf_repo": "x", "ladder": "toy"}
     config["models"] = {f"m{i}": {**model, "params_b": i, "active_params_b": i, "reference": i == 1} for i in (1, 2, 3)}
-    config["studies"] = {k: v for k, v in config["studies"].items() if k in ("S0", "S1-loo", "S1")}
     config["stats"]["resamples"] = 500
     (tmp_path / "trice.toml").write_text(tomli_w.dumps(config))
     monkeypatch.chdir(tmp_path)
     layout = Config().layout
     endpoints = [
-        Endpoint(name=m, backend="openrouter", model="x", provider="P", prompt_price=1e-7, completion_price=2e-7)
+        Endpoint(
+            name=m,
+            backend="openrouter",
+            model="x",
+            provider="P",
+            prompt_price=1e-7,
+            completion_price=2e-7,
+            hf_revision="r",
+        )
         for m in config["models"]
     ]
-    layout.endpoints.prepare().write_text(EndpointTable(endpoints).model_dump_json())
+    write_text(layout.endpoints, EndpointTable(endpoints).model_dump_json())
     for offset, name in enumerate(("toy_a", "toy_b")):
         splits = {"train": sentences(name, "train", 30, 10 * offset), "test": sentences(name, "test", 12, 100 + offset)}
         DatasetDict({s: Dataset.from_list([e.model_dump() for e in rows]) for s, rows in splits.items()}).save_to_disk(
-            layout.canonical.fill(dataset=name)
+            layout.canonical.format(dataset=name)
         )
     return tmp_path
 
@@ -138,20 +151,22 @@ def test_full_pipeline(project: Path) -> None:
             runner.execute(run, app.llms[run.model])
         assert app.analyzer.run_all() == ["S1", "S5"]
         tables = app.config.layout.tables
-        assert tables.fill(name="S1", suffix="tex").exists()
-        assert "\\begin{tikzpicture}" in tables.fill(name="S5-scaling", suffix="tex").read_text()
-        assert '"delta": 1.0' in tables.fill(name="S1-vs-zero_shot", suffix="json").read_text()
+        assert Path(tables.format(name="S1", suffix="tex")).exists()
+        assert "\\begin{tikzpicture}" in Path(tables.format(name="S5-scaling", suffix="tex")).read_text()
+        assert '"delta": 1.0' in Path(tables.format(name="S1-vs-zero_shot", suffix="json")).read_text()
 
         layout = app.config.layout
-        runs = layout.runs.match(slug="**/*")
-        before = [p.read_bytes() for p in runs]
-        assert not layout.runs_partial.match(slug="**/*")
+        runs = sorted(glob.glob(layout.runs.format(slug="**/*"), recursive=True))
+        before = [Path(p).read_bytes() for p in runs]
+        assert not glob.glob(layout.runs_partial.format(slug="**/*"), recursive=True)
         for p in runs:
-            p.unlink()
+            Path(p).unlink()
         for study in ("S0", "S1-loo", "S1"):
             for run in runner.expand_plan(study):
                 runner.execute(run, app.llms[run.model].model_copy(update={"mode": "replay"}))
-        assert [p.read_bytes() for p in layout.runs.match(slug="**/*")] == before
+        assert [
+            Path(p).read_bytes() for p in sorted(glob.glob(layout.runs.format(slug="**/*"), recursive=True))
+        ] == before
 
         budget = app.budget.model_copy(
             update={"counters": {m: TokenCounter(tokenizer=WordTokenizer()) for m in app.config.models}}
@@ -174,4 +189,4 @@ def test_failed_run_leaves_no_partial_result(project: Path) -> None:
         run = app.runner.expand_plan("S0", assume_format="P0")[0].model_copy(update={"condition": "zero_shot", "k": 0})
         with pytest.raises(RuntimeError):
             app.runner.execute(run, Failing())
-        assert not app.config.layout.runs.match(slug="**/*")
+        assert not glob.glob(app.config.layout.runs.format(slug="**/*"), recursive=True)

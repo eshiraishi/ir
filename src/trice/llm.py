@@ -3,6 +3,7 @@ routing, greedy decoding, thinking disabled, and a record/replay cache: every re
 under the hash of its canonical request, so analyses replay byte-identically."""
 
 import hashlib
+import itertools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol, runtime_checkable
 
@@ -17,7 +18,7 @@ from trice.schema import Backend, Completion, Message, Mode, Prompt
 class Routing(BaseModel):
     """OpenRouter provider routing: one pinned provider, no fallbacks."""
 
-    order: list[str | None]
+    order: list[str]
     allow_fallbacks: bool = False
     require_parameters: bool = True
     quantizations: list[str] | None = None
@@ -75,15 +76,19 @@ class OpenAITransport(BaseModel):
             raise PermissionError("OpenRouter requests are blocked: llm.allow_spend is false in trice.toml")
         response = self.client.chat.completions.create(**request.model_dump(exclude_none=True))
         usage = response.usage
+        details = usage.completion_tokens_details
+        provider = None
+        if self.backend == "openrouter":
+            if response.model_extra is None:
+                raise ValueError("OpenRouter response without a provider field")
+            provider = response.model_extra["provider"]
         return Completion(
-            text=response.choices[0].message.content or "",
+            text=response.choices[0].message.content,
             finish_reason=response.choices[0].finish_reason,
-            prompt_tokens=usage.prompt_tokens if usage else None,
-            completion_tokens=usage.completion_tokens if usage else None,
-            reasoning_tokens=usage.completion_tokens_details.reasoning_tokens
-            if usage and usage.completion_tokens_details
-            else None,
-            provider=(response.model_extra or {}).get("provider"),
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=details.reasoning_tokens if details is not None else None,
+            provider=provider,
         )
 
 
@@ -98,7 +103,7 @@ class Endpoint(BaseModel):
     thinking: bool = False
     prompt_price: float = 0.0  # USD per token
     completion_price: float = 0.0
-    hf_revision: str | None = None
+    hf_revision: str
 
 
 class EndpointTable(RootModel[list[Endpoint]]):
@@ -116,19 +121,18 @@ class LLM(BaseModel):
 
     def render_request(self, prompt: Prompt) -> ChatRequest:
         endpoint = self.endpoint
-        match endpoint.backend, endpoint.thinking:
-            case "openrouter", thinking:
-                extra = ExtraBody(
-                    provider=Routing(
-                        order=[endpoint.provider],
-                        quantizations=[endpoint.quantization] if endpoint.quantization else None,
-                    ),
-                    reasoning=Reasoning(enabled=False) if thinking else None,
-                )
-            case "local", True:
-                extra = ExtraBody(chat_template_kwargs=TemplateKwargs(enable_thinking=False))
-            case "local", False:
-                extra = ExtraBody()
+        if endpoint.backend == "openrouter":
+            if endpoint.provider is None:
+                raise ValueError(f"{endpoint.name}: an OpenRouter endpoint needs a pinned provider (run `trice pin`)")
+            quantizations = None if endpoint.quantization is None else [endpoint.quantization]
+            extra = ExtraBody(
+                provider=Routing(order=[endpoint.provider], quantizations=quantizations),
+                reasoning=Reasoning(enabled=False) if endpoint.thinking else None,
+            )
+        elif endpoint.thinking:
+            extra = ExtraBody(chat_template_kwargs=TemplateKwargs(enable_thinking=False))
+        else:
+            extra = ExtraBody()
         return ChatRequest(
             model=endpoint.model,
             messages=prompt.messages,
@@ -154,7 +158,7 @@ class LLM(BaseModel):
 
     def complete_many(self, prompts: list[Prompt], audit_tag: str = "") -> list[Completion]:
         with ThreadPoolExecutor(self.config.workers) as pool:
-            return list(pool.map(lambda p: self.complete(p, audit_tag), prompts))
+            return list(pool.map(self.complete, prompts, itertools.repeat(audit_tag)))
 
 
 class Pricing(BaseModel):
@@ -163,9 +167,9 @@ class Pricing(BaseModel):
 
 
 class ProviderEndpoint(BaseModel):
-    provider_name: str | None = None
-    quantization: str | None = None
-    supported_parameters: list[str] | None = None
+    provider_name: str
+    quantization: str | None  # null when the provider does not say
+    supported_parameters: list[str]
     pricing: Pricing
 
 
@@ -187,26 +191,26 @@ class Pinner(BaseModel):
     client: OpenAI
     config: LLMConfig
 
-    def pin(self, name: str, spec: ModelSpec, revision: str | None) -> Endpoint:
-        required = set(self.config.required_parameters) | ({"reasoning"} if spec.thinking else set())
-        precision = {q: i for i, q in enumerate(self.config.quantization_preference)}
+    def rank(self, endpoint: ProviderEndpoint) -> tuple[int, float, float, str]:
+        """Most faithful quantization first, then cheapest, then by provider name."""
+        order = self.config.quantization_preference
+        precision = order.index(endpoint.quantization) if endpoint.quantization in order else len(order)
+        return precision, endpoint.pricing.prompt, endpoint.pricing.completion, endpoint.provider_name
+
+    def pin(self, name: str, spec: ModelSpec, revision: str) -> Endpoint:
+        required = set(self.config.required_parameters)
+        if spec.thinking:
+            required.add("reasoning")
         try:
             listing = Listing.model_validate(self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=dict))
         except NotFoundError:  # the model is not listed on OpenRouter at all
             listing = Listing(data=Listing.Data(endpoints=[]))
-        chosen = min(
-            (e for e in listing.data.endpoints if required <= set(e.supported_parameters or [])),
-            key=lambda e: (
-                precision.get(e.quantization or "unknown", len(precision)),
-                (e.pricing.prompt, e.pricing.completion),
-                e.provider_name or "",
-            ),
-            default=None,
-        )
-        if chosen is None:
+        candidates = [e for e in listing.data.endpoints if required <= set(e.supported_parameters)]
+        if len(candidates) == 0:
             return Endpoint(
                 name=name, backend="local", model=spec.hf_repo, thinking=spec.thinking, hf_revision=revision
             )
+        chosen = sorted(candidates, key=self.rank)[0]
         return Endpoint(
             name=name,
             backend="openrouter",

@@ -45,12 +45,14 @@ class Inferrer(BaseModel):
     alpha: float
 
     def compare_pair(self, a: np.ndarray, b: np.ndarray, *seed: object) -> Comparison:
-        n, stacked = len(a), np.vstack([a, b])
+        n = len(a)
+        stacked = np.vstack([a, b])
 
         def delta(x: np.ndarray, y: np.ndarray, axis: int = -1) -> np.ndarray:
             return Evaluator.compute_f1(stacked[x].sum(axis=-2)) - Evaluator.compute_f1(stacked[y].sum(axis=-2))
 
-        x, y = np.arange(n), np.arange(n, 2 * n)
+        x = np.arange(n)
+        y = np.arange(n, 2 * n)
         test = stats.permutation_test(
             (x, y),
             delta,
@@ -69,7 +71,8 @@ class Inferrer(BaseModel):
             confidence_level=1 - self.alpha,
             rng=derive_seed("bootstrap", *seed),
         )
-        exact_a, exact_b = (a[:, 1:].sum(1) == 0), (b[:, 1:].sum(1) == 0)
+        exact_a = a[:, 1:].sum(1) == 0
+        exact_b = b[:, 1:].sum(1) == 0
         table = [
             [np.sum(exact_a & exact_b), np.sum(exact_a & ~exact_b)],
             [np.sum(~exact_a & exact_b), np.sum(~exact_a & ~exact_b)],
@@ -85,16 +88,19 @@ class Inferrer(BaseModel):
 
     def bootstrap_error(self, counts: np.ndarray, *seed: object) -> float:
         """Bootstrap SE of one system's micro-F1 (for the 1-SE robustness rule)."""
-        return float(
-            stats.bootstrap(
-                (np.arange(len(counts)),),
-                lambda i, axis=-1: Evaluator.compute_f1(counts[i].sum(axis=-2)),
-                vectorized=True,
-                method="percentile",
-                n_resamples=self.resamples,
-                rng=derive_seed("se", *seed),
-            ).standard_error
+
+        def micro_f1(indices: np.ndarray, axis: int = -1) -> np.ndarray:
+            return Evaluator.compute_f1(counts[indices].sum(axis=-2))
+
+        result = stats.bootstrap(
+            (np.arange(len(counts)),),
+            micro_f1,
+            vectorized=True,
+            method="percentile",
+            n_resamples=self.resamples,
+            rng=derive_seed("se", *seed),
         )
+        return float(result.standard_error)
 
     @staticmethod
     def test_friedman(scores: pd.DataFrame) -> Friedman:
@@ -110,5 +116,6 @@ class Inferrer(BaseModel):
     @staticmethod
     def test_trend(data: np.ndarray) -> Trend:
         """Page's L; ``data`` is (blocks, treatments) with treatments in increasing size."""
-        up, down = stats.page_trend_test(data).pvalue, stats.page_trend_test(data[:, ::-1]).pvalue
+        up = stats.page_trend_test(data).pvalue
+        down = stats.page_trend_test(data[:, ::-1]).pvalue
         return Trend(p_increasing=up, p_decreasing=down, p_two_sided=min(1.0, 2 * min(up, down)))

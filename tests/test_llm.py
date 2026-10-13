@@ -12,6 +12,7 @@ from trice.schema import Completion, Message, Prompt
 PROMPT = Prompt(messages=[Message(role="user", content="hi")], response_format={"type": "json_schema"}, stop=["\nX"])
 PINNED = Endpoint(
     name="qwen3.5-9b",
+    hf_revision="rev",
     backend="openrouter",
     model="qwen/qwen3.5-9b",
     provider="DeepInfra",
@@ -63,9 +64,9 @@ def test_openrouter_request_pins_routing_and_disables_thinking(llm):
         "reasoning": {"enabled": False},
     }
     assert (request.temperature, request.seed, request.stop) == (0.0, 0, ["\nX"])
-    local = llm(endpoint=Endpoint(name="q", backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True)).render_request(
-        PROMPT
-    )
+    local = llm(
+        endpoint=Endpoint(name="q", backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True, hf_revision="rev")
+    ).render_request(PROMPT)
     assert local.extra_body.model_dump(exclude_none=True) == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
@@ -135,6 +136,8 @@ OK = {
     "created": 0,
     "model": "m",
     "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    "provider": "P",
 }
 
 
