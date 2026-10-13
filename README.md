@@ -12,7 +12,8 @@ on held-out data:
 - **Prompt format:** chosen on training data among four candidates.
 - **Demonstration order:** shuffled with a per-query seed.
 
-The pre-registered design is in `docs/preregistration.md`.
+The method is described in `docs/methodology.md`; the pre-registered design is in
+`docs/preregistration.md`.
 
 ## Design
 
