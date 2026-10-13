@@ -17,8 +17,8 @@ The pre-registered design is in `docs/preregistration.md`.
 ## Design
 
 - **One config:** `trice.toml` holds every setting (datasets with pinned commits and SHA-256,
-  models, retrieval stacks, studies, sampling, statistics, and the `[layout]`: a path template for
-  every file the pipeline reads or writes, so no path is built in code). Secrets go in `.env` (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are
+  models, retrieval stacks, studies, sampling, statistics, and the `[layout]`: a path string with
+  `{placeholders}` for every file the pipeline reads or writes, filled with `str.format`). Secrets go in `.env` (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are
   parsed by `trice.config.Config` (pydantic-settings); nothing derives settings with functions.
 - **Composition root:** `trice.compose.compose` is one explicit function that builds and wires
   every component and returns them as an `App`; it is a context manager that closes the cache and
@@ -54,7 +54,7 @@ src/trice/
   evaluation/  scoring.py  inference.py  report.py
   templates/   prompts (p0, system, answer, probe, reranker) and reports (tables, budget)
 envs/compose.yaml   Docker services: `serve` (vLLM, for model sizes OpenRouter does not serve) and `baselines`
-envs/baselines/     Dockerfile + package for the GLiNER / GLiNER2 / NuNER-Zero baselines
+envs/baselines/     Dockerfile + baselines.py for the GLiNER / GLiNER2 / NuNER-Zero baselines
 ```
 
 vLLM 0.31 and gliner 0.2.29 pin older torch/transformers, which is why those two run in their own

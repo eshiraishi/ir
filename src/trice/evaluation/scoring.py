@@ -14,14 +14,17 @@ class Evaluator(BaseModel):
         """(n_sentences, 3) array of per-sentence (tp, fp, fn)."""
         rows = []
         for pred, gold in zip(predictions, references, strict=True):
-            p, g = set(get_entities(pred)), set(get_entities(gold))
-            rows.append((len(p & g), len(p - g), len(g - p)))
+            predicted = set(get_entities(pred))
+            expected = set(get_entities(gold))
+            rows.append((len(predicted & expected), len(predicted - expected), len(expected - predicted)))
         return np.array(rows, dtype=np.int64).reshape(-1, 3)
 
     @staticmethod
     def compute_f1(sums: np.ndarray) -> np.ndarray:
         """Micro-F1 of summed (tp, fp, fn), vectorized over leading axes."""
-        tp, fp, fn = sums[..., 0], sums[..., 1], sums[..., 2]
+        tp = sums[..., 0]
+        fp = sums[..., 1]
+        fn = sums[..., 2]
         denom = 2 * tp + fp + fn
         return np.divide(2 * tp, denom, out=np.zeros(np.shape(tp), float), where=denom > 0)
 
@@ -29,4 +32,7 @@ class Evaluator(BaseModel):
         """Per-type and overall precision/recall/F1 from the `evaluate` seqeval metric."""
         metric = evaluate.load("seqeval")
         # ty misreads evaluate's decorated EvaluationModule.compute(self, *, predictions, references).
-        return metric.compute(predictions=predictions, references=references) or {}  # ty: ignore[missing-argument]
+        result = metric.compute(predictions=predictions, references=references)  # ty: ignore[missing-argument]
+        if result is None:
+            raise RuntimeError("seqeval returned no result")
+        return result

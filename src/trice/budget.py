@@ -6,9 +6,9 @@ because demonstrations repeat across thousands of prompts; a sample is re-render
 report the error of that shortcut."""
 
 import hashlib
-import json
 import random
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment
@@ -76,14 +76,18 @@ class Budget(BaseModel):
     endpoints: list[Endpoint]
     counters: dict[str, TokenCounter] = Field(default_factory=dict)
 
+    def find_endpoint(self, model: str) -> Endpoint:
+        for endpoint in self.endpoints:
+            if endpoint.name == model:
+                return endpoint
+        raise KeyError(f"{model} has no pinned endpoint (run `trice pin`)")
+
     def load_counter(self, model: str) -> TokenCounter:
         if model not in self.counters:
-            endpoint = next((e for e in self.endpoints if e.name == model), None)
-            self.counters[model] = TokenCounter(
-                tokenizer=AutoTokenizer.from_pretrained(
-                    self.runner.config.models[model].hf_repo, revision=endpoint.hf_revision if endpoint else None
-                )
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.runner.config.models[model].hf_repo, revision=self.find_endpoint(model).hf_revision
             )
+            self.counters[model] = TokenCounter(tokenizer=tokenizer)
         return self.counters[model]
 
     def estimate(
@@ -98,76 +102,75 @@ class Budget(BaseModel):
         """Tokens and cost per study. Identical requests are counted once (the replay cache serves
         repeats), and prompts are built once per (dataset, queries, condition, format, k)."""
         stats = self.runner.config.stats
+        rankings = self.runner.config.layout.rankings
         groups: dict[tuple, list[tuple[str, Run]]] = defaultdict(list)
         for study in studies:
             for run in self.runner.expand_plan(study, assume_k, assume_format, models, datasets):
                 groups[(run.dataset, run.queries, run.condition, run.fmt, run.k)].append((study, run))
         seen: set[str] = set()
         totals = {study: Cost(study=study) for study in studies}
-        sample, rnd, calls, proxies = [], random.Random(0), 0, set()
+        sample: list[tuple[str, list[Message]]] = []
+        sampler = random.Random(0)
+        calls = 0
+        proxies: set[str] = set()
         for members in groups.values():
             first = members[0][1]
             # A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
             # priced with small/full, else random demonstrations: same k and format, same length.
-            priced = first
+            stored = first.condition
             if Condition.parse(first.condition).kind == "retrieval":
-                stored = next(
-                    (
-                        c
-                        for c in (first.condition, "small/full")
-                        if self.runner.config.layout.rankings.fill(
-                            stack=Condition.parse(c).stack, dataset=first.dataset, queries=first.queries
-                        ).exists()
-                    ),
-                    "random:0",
+                own = rankings.format(
+                    stack=Condition.parse(first.condition).stack, dataset=first.dataset, queries=first.queries
                 )
-                priced = first.model_copy(update={"condition": stored})
-            if priced.condition != first.condition:
-                proxies.add(f"{first.condition}->{priced.condition}")
+                small = rankings.format(stack="small", dataset=first.dataset, queries=first.queries)
+                if Path(own).exists():
+                    stored = first.condition
+                elif Path(small).exists():
+                    stored = "small/full"
+                else:
+                    stored = "random:0"
+            if stored != first.condition:
+                proxies.add(f"{first.condition}->{stored}")
             labels = self.runner.corpus.load_labels(first.dataset)
-            pairs = self.runner.render_prompts(priced)
+            pairs = self.runner.render_prompts(first.model_copy(update={"condition": stored}))
             for study, run in members:
                 counter = self.load_counter(run.model)
-                endpoint = next(
-                    (e for e in self.endpoints if e.name == run.model),
-                    Endpoint(name=run.model, backend="local", model=run.model),
-                )
+                endpoint = self.find_endpoint(run.model)
                 for query, prompt in pairs:
-                    key = hashlib.sha256(
-                        json.dumps([run.model, prompt.model_dump()], sort_keys=True).encode()
-                    ).hexdigest()
+                    key = hashlib.sha256(f"{run.model}|{prompt.model_dump_json()}".encode()).hexdigest()
                     if key in seen:
                         continue
                     seen.add(key)
-                    n_in = counter.count_messages(prompt.messages)
+                    tokens_in = counter.count_messages(prompt.messages)
                     answer = self.runner.formats[run.fmt].render_answer(labels, query)
-                    n_out = round(counter.count_text(answer) * stats.output_factor + stats.output_extra)
+                    tokens_out = round(counter.count_text(answer) * stats.output_factor + stats.output_extra)
                     totals[study].calls += 1
-                    totals[study].input_tokens += n_in
-                    totals[study].output_tokens += n_out
-                    totals[study].cost += n_in * endpoint.prompt_price + n_out * endpoint.completion_price
+                    totals[study].input_tokens += tokens_in
+                    totals[study].output_tokens += tokens_out
+                    totals[study].cost += tokens_in * endpoint.prompt_price + tokens_out * endpoint.completion_price
                     calls += 1
                     if len(sample) < checks:
                         sample.append((run.model, prompt.messages))
-                    elif (j := rnd.randrange(calls)) < checks:
-                        sample[j] = (run.model, prompt.messages)
-        errors = [
-            abs(self.load_counter(m).count_messages(msgs) - self.load_counter(m).count_exact(msgs))
-            / self.load_counter(m).count_exact(msgs)
-            for m, msgs in sample
-        ]
+                    else:
+                        slot = sampler.randrange(calls)
+                        if slot < checks:
+                            sample[slot] = (run.model, prompt.messages)
+        errors = []
+        for model, messages in sample:
+            exact = self.load_counter(model).count_exact(messages)
+            errors.append(abs(self.load_counter(model).count_messages(messages) - exact) / exact)
+        total = Cost(study="total")
+        for cost in totals.values():
+            total.calls += cost.calls
+            total.input_tokens += cost.input_tokens
+            total.output_tokens += cost.output_tokens
+            total.cost += cost.cost
         return BudgetReport(
             assume_k=assume_k,
             assume_format=assume_format,
             studies=list(totals.values()),
-            total=Cost(
-                study="total",
-                calls=sum(t.calls for t in totals.values()),
-                input_tokens=sum(t.input_tokens for t in totals.values()),
-                output_tokens=sum(t.output_tokens for t in totals.values()),
-                cost=sum(t.cost for t in totals.values()),
-            ),
-            max_error=max(errors, default=0.0),
+            total=total,
+            max_error=max(errors) if len(errors) > 0 else 0.0,
             checked=len(errors),
             proxies=sorted(proxies),
         )

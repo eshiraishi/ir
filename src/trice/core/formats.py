@@ -15,9 +15,17 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from trice.schema import Example, FormatName, LabelMap, Message, Parsed, Prompt
 
-Candidates = tuple[
-    list[tuple[str, str, int]], int, bool
-]  # (span, label, token position or -1), broken items, malformed
+
+class Candidate(BaseModel):
+    text: str
+    label: str
+    position: int  # first token in the query when the output says so (P3), else -1
+
+
+class Candidates(BaseModel):
+    found: list[Candidate]
+    broken: int  # items that could not be read at all
+    malformed: bool  # nothing could be read
 
 
 class JsonEntity(BaseModel):
@@ -44,7 +52,10 @@ class Format(Protocol):
 
 
 def render_answer(env: Environment, name: FormatName, labels: LabelMap, example: Example) -> str:
-    return env.get_template("answer_only.j2").render(fmt=name, **labels.describe(example))
+    description = labels.describe(example)
+    return env.get_template("answer_only.j2").render(
+        fmt=name, mentions=description.mentions, segments=description.segments
+    )
 
 
 def render_chat(
@@ -54,41 +65,47 @@ def render_chat(
     system = env.get_template("system.j2").render(fmt=name, types=types, tags=[labels.tag(t) for t in types])
     messages = [Message(role="system", content=system)]
     for demo in demos:
-        messages += [
-            Message(role="user", content=demo.text),
-            Message(role="assistant", content=render_answer(env, name, labels, demo)),
-        ]
-    return [*messages, Message(role="user", content=query.text)]
+        messages.append(Message(role="user", content=demo.text))
+        messages.append(Message(role="assistant", content=render_answer(env, name, labels, demo)))
+    messages.append(Message(role="user", content=query.text))
+    return messages
 
 
 def align(candidates: Candidates, labels: LabelMap, query: Example) -> Parsed:
     """Align each proposed mention to the query tokens: at its own position when the output gives
     one (P3), else at the first free occurrence. Mentions with an unknown label or no free
     occurrence count as invalid."""
-    pairs, broken, malformed = candidates
-    tags, invalid = ["O"] * len(query.tokens), broken
-    for text, label, position in pairs:
-        raw, words = labels.resolve(label), text.split()
-        starts = [
-            i
-            for i in range(len(query.tokens) - len(words) + 1)
-            if words and query.tokens[i : i + len(words)] == words and set(tags[i : i + len(words)]) == {"O"}
-        ]
-        if raw is None or not starts:
+    tags = ["O"] * len(query.tokens)
+    invalid = candidates.broken
+    for candidate in candidates.found:
+        raw = labels.resolve(candidate.label)
+        words = candidate.text.split()
+        starts = []
+        for i in range(len(query.tokens) - len(words) + 1):
+            free = all(tag == "O" for tag in tags[i : i + len(words)])
+            if len(words) > 0 and query.tokens[i : i + len(words)] == words and free:
+                starts.append(i)
+        if raw is None or len(starts) == 0:
             invalid += 1
             continue
-        first = position if position in starts else starts[0]
+        first = candidate.position if candidate.position in starts else starts[0]
         tags[first : first + len(words)] = [f"B-{raw}"] + [f"I-{raw}"] * (len(words) - 1)
-    return Parsed(tags=tags, candidates=len(pairs) + broken, invalid=invalid, malformed=malformed)
+    return Parsed(
+        tags=tags, candidates=len(candidates.found) + candidates.broken, invalid=invalid, malformed=candidates.malformed
+    )
 
 
 def read_list(output: str) -> Candidates:
-    lines = [line for line in output.strip().splitlines() if line.strip()]
-    if [line.strip().rstrip(".").lower() for line in lines] in ([], ["none"]):
-        return [], 0, False
-    items = [re.match(r"^\s*\d+\s*[.)]\s*(.+)\(([^()]*)\)\s*$", line) for line in lines]
-    pairs = [(m[1].strip(), m[2], -1) for m in items if m]
-    return pairs, len(items) - len(pairs), not pairs
+    lines = [line for line in output.strip().splitlines() if line.strip() != ""]
+    stripped = [line.strip().rstrip(".").lower() for line in lines]
+    if stripped == [] or stripped == ["none"]:
+        return Candidates(found=[], broken=0, malformed=False)
+    found = []
+    for line in lines:
+        match = re.match(r"^\s*\d+\s*[.)]\s*(.+)\(([^()]*)\)\s*$", line)
+        if match is not None:
+            found.append(Candidate(text=match[1].strip(), label=match[2], position=-1))
+    return Candidates(found=found, broken=len(lines) - len(found), malformed=len(found) == 0)
 
 
 class ListingFormat(BaseModel):
@@ -160,9 +177,12 @@ class JsonFormat(BaseModel):
         try:
             items = JsonAnswer.model_validate_json(output).entities
         except ValidationError:
-            return align(([], 0, True), labels, query)
-        pairs = [(i.text, i.type, -1) for i in items if isinstance(i, JsonEntity)]
-        return align((pairs, len(items) - len(pairs), False), labels, query)
+            return align(Candidates(found=[], broken=0, malformed=True), labels, query)
+        found = []
+        for item in items:
+            if isinstance(item, JsonEntity):
+                found.append(Candidate(text=item.text, label=item.type, position=-1))
+        return align(Candidates(found=found, broken=len(items) - len(found), malformed=False), labels, query)
 
 
 class InlineFormat(BaseModel):
@@ -179,8 +199,8 @@ class InlineFormat(BaseModel):
 
     def parse_output(self, labels: LabelMap, output: str, query: Example) -> Parsed:
         tag = r"</?[A-Za-z0-9_\-]+>"
-        pairs = [
-            (m[2], m[1], len(re.sub(tag, "", output[: m.start()]).split()))
-            for m in re.finditer(r"<([A-Za-z0-9_\-]+)>(.*?)</\1>", output)
-        ]
-        return align((pairs, 0, False), labels, query)
+        found = []
+        for match in re.finditer(r"<([A-Za-z0-9_\-]+)>(.*?)</\1>", output):
+            position = len(re.sub(tag, "", output[: match.start()]).split())
+            found.append(Candidate(text=match[2], label=match[1], position=position))
+        return align(Candidates(found=found, broken=0, malformed=False), labels, query)

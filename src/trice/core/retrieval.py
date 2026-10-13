@@ -3,6 +3,7 @@
 Pure ranking logic; the scorers themselves (models, APIs) live in core/encoders.py.
 """
 
+import operator
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -51,7 +52,7 @@ class Retriever(BaseModel):
         return np.lexsort((ids, -scores))
 
     def rank(self, queries: list[Example], pool: list[Example], loo: bool) -> list[Ranking]:
-        pool = sorted(pool, key=lambda e: e.id)
+        pool = sorted(pool, key=operator.attrgetter("id"))
         ids = np.array([e.id for e in pool])
         texts = [e.text for e in pool]
         matrices = [(s.name, s.scorer.score([q.text for q in queries], texts)) for s in self.stages]
@@ -59,7 +60,8 @@ class Retriever(BaseModel):
         for qi, query in enumerate(queries):
             keep = np.array([not (loo and (e.id == query.id or e.text == query.text)) for e in pool])
             kept = np.flatnonzero(keep)
-            stages, rrf = [], np.zeros(len(kept))
+            stages = []
+            rrf = np.zeros(len(kept))
             for name, matrix in matrices:
                 order = self.order(matrix[qi][kept], ids[kept])
                 stages.append(Ranking(query_id=query.id, stage=name, ids=ids[kept][order][: self.store_depth].tolist()))
@@ -83,7 +85,7 @@ class Retriever(BaseModel):
 
 
 def select_demonstrations(
-    condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranked: list[str] | None
+    condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranked: list[str]
 ) -> list[Example]:
     """The k demonstrations for one query, shuffled with the per-query seed so their order never
     carries rank or dataset order."""
@@ -95,7 +97,7 @@ def select_demonstrations(
         rng = np.random.default_rng(derive_seed("random", condition.seed, dataset, query.id))
         chosen = rng.choice(ids, size=k, replace=False).tolist()
     else:
-        chosen = (ranked or [])[:k]
+        chosen = ranked[:k]
         if len(chosen) < k:
             raise ValueError(f"{dataset}/{query.id}: only {len(chosen)} candidates for k={k}")
     rng = np.random.default_rng(derive_seed("order", dataset, query.id))

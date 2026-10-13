@@ -7,7 +7,6 @@ from pydantic import BaseModel
 
 from trice.evaluation.inference import Inferrer
 from trice.evaluation.scoring import Evaluator
-from trice.schema import PathTemplate
 
 
 def counts(n: int, p_tp: float, seed: int) -> np.ndarray:
@@ -67,19 +66,20 @@ class Point(BaseModel):
     k: int
     f1: float
     curve: str
+    panel: str
 
 
 def test_reporter_writes_tables_and_tikz(app, tmp_path):
-    reporter = app.analyzer.reporter.model_copy(update={"tables": PathTemplate(f"{tmp_path}/{{name}}.{{suffix}}")})
+    reporter = app.analyzer.reporter.model_copy(update={"tables": f"{tmp_path}/{{name}}.{{suffix}}"})
     reporter.write_table("t", [Row(model="m_1", f1=0.12345)], "Caption & more")
     assert "0.1235" in (tmp_path / "t.md").read_text()
     assert r"m\_1" in (tmp_path / "t.tex").read_text()
     points = [
-        Point(k=k, f1=f, curve=c)
+        Point(k=k, f1=f, curve=c, panel="all")
         for c, fs in (("a", [0.1, 0.3, 0.4]), ("b", [0.2, 0.3, 0.35]))
         for k, f in enumerate(fs)
     ]
-    reporter.plot_lines("curves", points, x="k", y="f1", hue="curve")
+    reporter.plot_lines("curves", points, x="k", y="f1", hue="curve", col="panel")
     assert "\\begin{tikzpicture}" in (tmp_path / "curves.tex").read_text()
     reporter.plot_critical_difference(
         "cd",

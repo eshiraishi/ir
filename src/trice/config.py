@@ -5,25 +5,25 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict, TomlConfigSettingsSource
 
-from trice.schema import FormatName, LabelMap, ModelRef, PathTemplate, QuerySet, Runtime, Split
+from trice.schema import FormatName, LabelMap, LocalRef, ModelRef, QuerySet, Runtime, Split
 
 
 class Layout(BaseModel):
-    raw: PathTemplate
-    canonical: PathTemplate
-    rankings: PathTemplate
-    cache: PathTemplate
-    endpoints: PathTemplate
-    frozen_format: PathTemplate
-    k_star: PathTemplate
-    runs: PathTemplate
-    runs_partial: PathTemplate
-    audit: PathTemplate
-    contamination: PathTemplate
-    baselines: PathTemplate
-    training: PathTemplate
-    budget: PathTemplate
-    tables: PathTemplate
+    raw: str
+    canonical: str
+    rankings: str
+    cache: str
+    endpoints: str
+    frozen_format: str
+    k_star: str
+    runs: str
+    runs_partial: str
+    audit: str
+    contamination: str
+    baselines: str
+    training: str
+    budget: str
+    tables: str
 
 
 class LLMConfig(BaseModel):
@@ -43,7 +43,7 @@ class LLMConfig(BaseModel):
 
 class TriceStack(BaseModel):
     kind: Literal["trice"]
-    sparse: ModelRef
+    sparse: LocalRef
     dense: ModelRef
     reranker: ModelRef
 
@@ -96,7 +96,7 @@ class SourceSpec(BaseModel):
 class FileSpec(BaseModel):
     path: str
     size: int
-    sha256: str | None = None
+    sha256: str
 
 
 class DatasetSpec(BaseModel):

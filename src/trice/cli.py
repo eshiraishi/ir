@@ -11,7 +11,7 @@ from huggingface_hub import HfApi
 from trice.compose import App, compose
 from trice.config import Config
 from trice.llm import Endpoint, EndpointTable
-from trice.schema import FormatName
+from trice.schema import FormatName, write_text
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 Datasets = Annotated[list[str] | None, typer.Option("--dataset", "-d")]
@@ -27,7 +27,7 @@ def main(ctx: typer.Context) -> None:
 def data(ctx: typer.Context, datasets: Datasets = None) -> None:
     """Fetch pinned files (hash-checked) and build the HF datasets."""
     trice: App = ctx.obj
-    for name in datasets or list(trice.config.datasets):
+    for name in list(trice.config.datasets) if datasets is None else datasets:
         built = trice.corpus.build(name)
         typer.echo(f"{name}: train={built['train'].num_rows} test={built['test'].num_rows}")
 
@@ -42,11 +42,17 @@ def rank(
 ) -> None:
     """Compute and store rankings once; later stages only read them."""
     trice: App = ctx.obj
-    for name in (datasets or list(trice.config.datasets)) + (
-        [f"conll2003@{n}" for n in trice.config.selection.pool_sizes] if pools else []
-    ):
-        for qs in ("test", "loo") if queries == "both" else (queries,):
-            typer.echo(f"{stack}/{name}/{qs}: {trice.runner.store_rankings(stack, trice.retrievers[stack], name, qs)}")
+    names = list(trice.config.datasets) if datasets is None else datasets
+    if pools:
+        for size in trice.config.selection.pool_sizes:
+            names.append(f"conll2003@{size}")
+    for name in names:
+        if queries in ["test", "both"]:
+            digest = trice.runner.store_rankings(stack, trice.retrievers[stack], name, "test")
+            typer.echo(f"{stack}/{name}/test: {digest}")
+        if queries in ["loo", "both"]:
+            digest = trice.runner.store_rankings(stack, trice.retrievers[stack], name, "loo")
+            typer.echo(f"{stack}/{name}/loo: {digest}")
 
 
 @app.command()
@@ -55,11 +61,14 @@ def pin(ctx: typer.Context, models: Models = None) -> None:
     trice: App = ctx.obj
     pinned: list[Endpoint] = []
     for name, spec in trice.config.models.items():
-        if not models or name in models:
-            pinned.append(trice.pinner.pin(name, spec, HfApi().model_info(spec.hf_repo).sha))
+        if models is None or name in models:
+            revision = HfApi().model_info(spec.hf_repo).sha
+            if revision is None:
+                raise ValueError(f"{spec.hf_repo}: Hugging Face returned no commit")
+            pinned.append(trice.pinner.pin(name, spec, revision))
             typer.echo(f"{name}: {pinned[-1].backend} {pinned[-1].provider} {pinned[-1].quantization}")
     kept = [e for e in trice.endpoints if e.name not in {p.name for p in pinned}]
-    trice.config.layout.endpoints.prepare().write_text(EndpointTable([*kept, *pinned]).model_dump_json(indent=2))
+    write_text(trice.config.layout.endpoints, EndpointTable(kept + pinned).model_dump_json(indent=2))
 
 
 @app.command()
@@ -81,8 +90,8 @@ def budget(
     """Dry run: count every planned prompt with each model's tokenizer and price it. No calls."""
     trice: App = ctx.obj
     for assumed in k:
-        report = trice.budget.estimate(studies or list(trice.config.studies), assumed, fmt)
-        trice.config.layout.budget.prepare(k=assumed, format=fmt).write_text(report.model_dump_json(indent=2))
+        report = trice.budget.estimate(list(trice.config.studies) if studies is None else studies, assumed, fmt)
+        write_text(trice.config.layout.budget.format(k=assumed, format=fmt), report.model_dump_json(indent=2))
         typer.echo(trice.budget.render(report))
 
 
@@ -134,7 +143,8 @@ def probe(ctx: typer.Context, model: str) -> None:
 @app.command()
 def analyze(ctx: typer.Context) -> None:
     """Write every pre-registered table and figure whose runs are complete."""
-    typer.echo(", ".join(ctx.obj.analyzer.run_all()) or "nothing complete yet")
+    done = ctx.obj.analyzer.run_all()
+    typer.echo(", ".join(done) if len(done) > 0 else "nothing complete yet")
 
 
 @app.command()

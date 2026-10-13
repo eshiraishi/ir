@@ -3,14 +3,17 @@
 Read top to bottom, it is the whole architecture. To customize, edit it, or pass a ``transport`` to
 replace the network (tests do). It is the only place that turns a Config into components."""
 
+import functools
 import json
 from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 from diskcache import Cache
 from jinja2 import Environment, PackageLoader, StrictUndefined
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
+from pydantic_core import to_jsonable_python
 
 from trice.analyzer import Analyzer
 from trice.budget import Budget
@@ -24,7 +27,7 @@ from trice.evaluation.report import Reporter
 from trice.evaluation.scoring import Evaluator
 from trice.llm import LLM, Endpoint, EndpointTable, OpenAITransport, Pinner, Transport
 from trice.runner import Runner
-from trice.schema import FormatName, ModelRef
+from trice.schema import FormatName, HostedRef, LocalRef, ModelRef
 
 
 class App(BaseModel):
@@ -45,18 +48,16 @@ class App(BaseModel):
 @contextmanager
 def compose(config: Config, transport: Transport | None = None) -> Generator[App]:
     with ExitStack() as stack:
-        layout, llm, retrieval = config.layout, config.llm, config.retrieval
+        layout = config.layout
+        llm = config.llm
+        retrieval = config.retrieval
 
         # Templates: every prompt and report string is rendered from src/trice/templates.
         env = Environment(loader=PackageLoader("trice"), undefined=StrictUndefined, autoescape=False)
-        env.filters.update(
-            json=lambda v: json.dumps(v, ensure_ascii=False),
-            cell=lambda v: f"{v:.4f}" if isinstance(v, float) else str(v),
-            latex=lambda v: "".join("\\" + c if c in "&%$#_{}" else c for c in str(v)),
-        )
+        env.filters["json"] = functools.partial(json.dumps, ensure_ascii=False, default=to_jsonable_python)
 
         # Network and storage: one client per backend, one record/replay cache.
-        cache = stack.enter_context(Cache(layout.cache.fill()))
+        cache = stack.enter_context(Cache(layout.cache))
         openrouter = stack.enter_context(
             OpenAI(
                 base_url=llm.openrouter_url,
@@ -65,11 +66,12 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
                 timeout=llm.timeout,
             )
         )
-        hosted = transport or OpenAITransport(client=openrouter, backend="openrouter", allow_spend=llm.allow_spend)
-        local = transport or OpenAITransport(
-            client=stack.enter_context(OpenAI(base_url=llm.local_url, api_key="local", timeout=llm.timeout)),
-            backend="local",
-        )
+        if transport is None:
+            hosted = OpenAITransport(client=openrouter, backend="openrouter", allow_spend=llm.allow_spend)
+            local_client = stack.enter_context(OpenAI(base_url=llm.local_url, api_key="local", timeout=llm.timeout))
+            local = OpenAITransport(client=local_client, backend="local")
+        else:
+            hosted = local = transport
 
         # Data and prompt formats (the order is the order of the S0 candidates).
         corpus = Corpus(raw=layout.raw, canonical=layout.canonical, sources=config.sources, specs=config.datasets)
@@ -84,16 +86,22 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
         api = ApiClient(client=openrouter, cache=cache, allow_spend=llm.allow_spend)
 
         def scorer(ref: ModelRef, stage: str, prompt: str | None = None) -> Scorer:
-            if ref.backend == "openrouter":
-                return ApiScorer(api=api, model_id=ref.id)
-            if stage == "sparse":
-                return SparseScorer(ref=ref, runtime=retrieval.runtime)
-            return DenseScorer(ref=ref, runtime=retrieval.runtime, query_prompt=prompt)
+            match ref:
+                case HostedRef():
+                    return ApiScorer(api=api, model_id=ref.id)
+                case LocalRef() if stage == "sparse":
+                    return SparseScorer(ref=ref, runtime=retrieval.runtime)
+                case LocalRef():
+                    return DenseScorer(ref=ref, runtime=retrieval.runtime, query_prompt=prompt)
 
         def reranker(ref: ModelRef) -> Reranker:
-            if ref.backend == "openrouter":
-                return ApiReranker(api=api, model_id=ref.id)
-            return QwenReranker(ref=ref, runtime=retrieval.runtime, instruction=retrieval.reranker_instruction, env=env)
+            match ref:
+                case HostedRef():
+                    return ApiReranker(api=api, model_id=ref.id)
+                case LocalRef():
+                    return QwenReranker(
+                        ref=ref, runtime=retrieval.runtime, instruction=retrieval.reranker_instruction, env=env
+                    )
 
         retrievers = {}
         for name, spec in retrieval.stacks.items():
@@ -105,12 +113,11 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
                     ]
                     ranker = reranker(spec.reranker)
                 case BM25Stack():
-                    stages, ranker = [Stage(name="bm25", scorer=BM25Scorer(k1=spec.k1, b=spec.b))], None
+                    stages = [Stage(name="bm25", scorer=BM25Scorer(k1=spec.k1, b=spec.b))]
+                    ranker = None
                 case DenseStack():
-                    stages, ranker = (
-                        [Stage(name="dense", scorer=scorer(spec.dense, "dense", spec.query_instruction))],
-                        None,
-                    )
+                    stages = [Stage(name="dense", scorer=scorer(spec.dense, "dense", spec.query_instruction))]
+                    ranker = None
             retrievers[name] = Retriever(
                 stages=stages,
                 reranker=ranker,
@@ -120,10 +127,9 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
             )
 
         # Model calls: the pinned endpoint of every model (written by `trice pin`).
+        endpoints_path = Path(layout.endpoints)
         endpoints = (
-            EndpointTable.model_validate_json(layout.endpoints.fill().read_text()).root
-            if layout.endpoints.fill().exists()
-            else []
+            EndpointTable.model_validate_json(endpoints_path.read_text()).root if endpoints_path.exists() else []
         )
 
         # Studies, budget and analysis.

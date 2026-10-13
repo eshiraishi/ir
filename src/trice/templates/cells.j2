@@ -1,0 +1,7 @@
+{#- Table cells: floats to four decimals; LaTeX-special characters escaped. -#}
+{%- macro cell(v) -%}
+{% if v is float %}{{ "%.4f" | format(v) }}{% else %}{{ v }}{% endif %}
+{%- endmacro -%}
+{%- macro tex(v) -%}
+{{ cell(v) | replace("&", "\\&") | replace("%", "\\%") | replace("$", "\\$") | replace("#", "\\#") | replace("_", "\\_") | replace("{", "\\{") | replace("}", "\\}") }}
+{%- endmacro -%}
