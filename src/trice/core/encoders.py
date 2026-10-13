@@ -4,15 +4,16 @@ hosted large stack (OpenRouter through the OpenAI client). All run deterministic
 import hashlib
 import operator
 from functools import cached_property
+from typing import Any
 
 import bm25s
 import numpy as np
 import spacy
 import torch
 from diskcache import Cache
+from huggingface_hub import hf_hub_download
 from jinja2 import Environment
 from openai import OpenAI
-from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, ConfigDict
 from safetensors import safe_open
 from sentence_transformers import SentenceTransformer, SparseEncoder
@@ -38,7 +39,8 @@ def patch_remote_model(model: torch.nn.Module, checkpoint: str) -> None:
     which is restored from ``checkpoint``), and rebuild the
     non-persistent buffers v5 leaves uninitialized (garbage ``position_ids``, rotary tables) the
     way the model's own __init__ does. Idempotent: a correctly initialized model gets the same values."""
-    for module in model.modules():
+    modules: list[Any] = list(model.modules())  # remote-code attributes are only known at run time
+    for module in modules:
         if isinstance(getattr(module, "lm_head", None), torch.nn.Module) and hasattr(module.lm_head, "decoder"):
             module.lm_head.decoder.weight = module.get_input_embeddings().weight
             with safe_open(checkpoint, "pt") as f:  # v5 re-initialized the whole decoder, bias included
