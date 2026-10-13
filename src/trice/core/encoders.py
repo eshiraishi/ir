@@ -4,7 +4,6 @@ hosted large stack (OpenRouter through the OpenAI client). All run deterministic
 import hashlib
 import json
 from functools import cached_property
-from typing import cast
 
 import bm25s
 import numpy as np
@@ -15,7 +14,7 @@ from jinja2 import Environment
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
 from sentence_transformers import SentenceTransformer, SparseEncoder
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
 
 from trice.schema import ModelRef, Runtime
 
@@ -106,9 +105,10 @@ class QwenReranker(BaseModel):
     batch_size: int = 16
 
     @cached_property
-    def tokenizer(self) -> PreTrainedTokenizerBase:
-        tokenizer = AutoTokenizer.from_pretrained(self.ref.id, revision=self.ref.revision, padding_side="left")
-        return cast(PreTrainedTokenizerBase, tokenizer)
+    def tokenizer(self) -> PreTrainedTokenizerFast:
+        return PreTrainedTokenizerFast.from_pretrained(
+            self.ref.id, revision=self.ref.revision or "main", padding_side="left"
+        )
 
     @cached_property
     def model(self) -> PreTrainedModel:
@@ -158,8 +158,8 @@ class ApiClient(BaseModel):
         if key not in self.cache:
             if not self.allow_spend:
                 raise PermissionError("OpenRouter requests are blocked: llm.allow_spend is false in trice.toml")
-            self.cache[key] = self.client.post(path, body=body, cast_to=object)
-        return cast(dict, self.cache[key])
+            self.cache[key] = self.client.post(path, body=body, cast_to=dict)
+        return self.cache[key]
 
 
 class ApiScorer(BaseModel):

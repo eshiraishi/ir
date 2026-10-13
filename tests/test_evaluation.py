@@ -45,9 +45,8 @@ def test_compare_detects_differences_and_is_seeded():
     assert inferrer.compare_pair(a, a.copy(), "y").delta == 0
 
 
-def test_corrections_and_omnibus_tests():
+def test_omnibus_and_trend_tests():
     inferrer = Inferrer(resamples=1_000, alpha=0.05)
-    assert inferrer.correct_holm([0.01, 0.04, 0.03, 0.005]) == pytest.approx([0.03, 0.06, 0.06, 0.02])
     scores = pd.DataFrame(np.random.default_rng(0).random((20, 4)) + np.array([0, 0.5, 1.0, 1.5]), columns=list("abcd"))
     friedman = inferrer.test_friedman(scores)
     assert friedman.p_value < 0.05 and friedman.mean_ranks["d"] < friedman.mean_ranks["a"]

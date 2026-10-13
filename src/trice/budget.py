@@ -63,17 +63,6 @@ class Budget(BaseModel):
             )
         return self.counters[model]
 
-    def derive_proxy(self, run: Run) -> Run:
-        """A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
-        priced with small/full, else random demonstrations: same k and format, same length."""
-        if Condition.parse(run.condition).kind != "retrieval":
-            return run
-        for candidate in (run.condition, "small/full"):
-            stack = Condition.parse(candidate).stack
-            if (self.runner.config.layout.rankings / stack / run.dataset / run.queries).exists():
-                return run.model_copy(update={"condition": candidate})
-        return run.model_copy(update={"condition": "random:0"})
-
     def estimate(
         self,
         studies: list[str],
@@ -95,7 +84,20 @@ class Budget(BaseModel):
         sample, rnd, calls, proxies = [], random.Random(0), 0, set()
         for members in groups.values():
             first = members[0][1]
-            priced = self.derive_proxy(first)
+            # A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
+            # priced with small/full, else random demonstrations: same k and format, same length.
+            priced = first
+            if Condition.parse(first.condition).kind == "retrieval":
+                rankings = self.runner.config.layout.rankings
+                stored = next(
+                    (
+                        c
+                        for c in (first.condition, "small/full")
+                        if (rankings / Condition.parse(c).stack / first.dataset / first.queries).exists()
+                    ),
+                    "random:0",
+                )
+                priced = first.model_copy(update={"condition": stored})
             if priced.condition != first.condition:
                 proxies.add(f"{first.condition}->{priced.condition}")
             labels = self.runner.corpus.load_labels(first.dataset)

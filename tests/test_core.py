@@ -4,7 +4,7 @@ from conftest import example
 from pydantic import BaseModel
 
 from trice.core.retrieval import Retriever, select_demonstrations
-from trice.core.selection import select_format, select_k
+from trice.core.selection import select_k
 from trice.schema import Condition
 
 S1 = example(0, ["John", "Smith", "visited", "New", "York", "."], ["B-PER", "I-PER", "O", "B-LOC", "I-LOC", "O"])
@@ -128,7 +128,7 @@ def test_demonstrations_are_seeded_and_order_free():
         Condition.parse("small")
 
 
-def test_select_k_and_format():
+def test_select_k():
     ks = [0, 1, 2, 4, 8, 16, 32, 64]
     rising = select_k(dict(zip(ks, [0.2, 0.4, 0.5, 0.6, 0.7, 0.7, 0.7, 0.7], strict=True)))
     assert rising.rule == "kneedle" and rising.k_star in (4, 8)
@@ -137,4 +137,3 @@ def test_select_k_and_format():
         "rule": "isotonic-max",
     }
     assert select_k(dict(zip(ks, [0.7, 0.6, 0.6, 0.5, 0.5, 0.4, 0.4, 0.3], strict=True))).k_star == 0
-    assert select_format({"P1": 0.5, "P0": 0.5, "P3": 0.4}) == "P0"

@@ -42,13 +42,11 @@ def rank(
 ) -> None:
     """Compute and store rankings once; later stages only read them."""
     trice: App = ctx.obj
-    names = (datasets or list(trice.config.datasets)) + (
+    for name in (datasets or list(trice.config.datasets)) + (
         [f"conll2003@{n}" for n in trice.config.selection.pool_sizes] if pools else []
-    )
-    for name in names:
+    ):
         for qs in ("test", "loo") if queries == "both" else (queries,):
-            digest = trice.runner.store_rankings(stack, trice.retrievers[stack], name, qs)
-            typer.echo(f"{stack}/{name}/{qs}: {digest}")
+            typer.echo(f"{stack}/{name}/{qs}: {trice.runner.store_rankings(stack, trice.retrievers[stack], name, qs)}")
 
 
 @app.command()
@@ -120,8 +118,8 @@ def select_k(ctx: typer.Context, study: str = "S1-loo") -> None:
 def audit(ctx: typer.Context, model: str, tag: str) -> None:
     """S7: resend the fixed audit prompts live (repeat with a new tag on different days)."""
     trice: App = ctx.obj
-    llm = trice.llms[model].model_copy(update={"mode": "bypass"})
-    typer.echo(json.dumps(trice.runner.audit(model, llm, tag), indent=2))
+    audited = trice.runner.audit(model, trice.llms[model].model_copy(update={"mode": "bypass"}), tag)
+    typer.echo(json.dumps(audited, indent=2))
 
 
 @app.command()

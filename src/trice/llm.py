@@ -5,7 +5,7 @@ under the hash of its canonical request, so analyses replay byte-identically."""
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from diskcache import Cache
 from openai import NotFoundError, OpenAI
@@ -90,12 +90,9 @@ class LLM(BaseModel):
             **{k: v for k, v in optional.items() if v is not None},
         }
 
-    def hash_request(self, request: dict) -> str:
-        return hashlib.sha256(json.dumps([self.endpoint.backend, request], sort_keys=True).encode()).hexdigest()
-
     def complete(self, prompt: Prompt, audit_tag: str = "") -> Completion:
         request = self.render_request(prompt)
-        key = self.hash_request(request)
+        key = hashlib.sha256(json.dumps([self.endpoint.backend, request], sort_keys=True).encode()).hexdigest()
         if self.mode != "bypass" and key in self.cache:
             return self.parse_completion(self.cache[key])
         if self.mode == "replay":
@@ -130,25 +127,23 @@ class Pinner(BaseModel):
     client: OpenAI
     config: LLMConfig
 
-    def choose_endpoint(self, endpoints: list[dict], thinking: bool) -> dict | None:
-        required = set(self.config.required_parameters) | ({"reasoning"} if thinking else set())
-        prefs = self.config.quantization_preference
-        ok = [e for e in endpoints if required <= set(e.get("supported_parameters") or [])]
-
-        def preference(e: dict) -> tuple:
-            quantization = e.get("quantization") or "unknown"
-            precision = prefs.index(quantization) if quantization in prefs else len(prefs)
-            price = (float(e["pricing"]["prompt"]), float(e["pricing"]["completion"]))
-            return precision, price, e.get("provider_name") or ""
-
-        return min(ok, key=preference) if ok else None
-
     def pin(self, spec: ModelSpec, revision: str | None) -> Endpoint:
+        required = set(self.config.required_parameters) | ({"reasoning"} if spec.thinking else set())
+        precision = {q: i for i, q in enumerate(self.config.quantization_preference)}
         try:
-            data = cast(dict, self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=object))
-            chosen = self.choose_endpoint(data["data"]["endpoints"], spec.thinking)
+            listing = self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=dict)["data"]["endpoints"]
         except NotFoundError:  # the model is not listed on OpenRouter at all
-            chosen = None
+            listing = []
+        supported = [e for e in listing if required <= set(e.get("supported_parameters") or [])]
+        chosen = min(
+            supported,
+            key=lambda e: (
+                precision.get(e.get("quantization") or "unknown", len(precision)),
+                (float(e["pricing"]["prompt"]), float(e["pricing"]["completion"])),
+                e.get("provider_name") or "",
+            ),
+            default=None,
+        )
         if chosen is None:
             return Endpoint(backend="local", model=spec.hf_repo, thinking=spec.thinking, hf_revision=revision)
         return Endpoint(

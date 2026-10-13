@@ -6,6 +6,8 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
 
 from trice.evaluation.report import Reporter
 from trice.runner import Runner
@@ -40,9 +42,8 @@ class Analyzer(BaseModel):
             {**keys, **e.inferrer.compare_pair(e.count_matches(a), e.count_matches(b), a.slug, b.slug).model_dump()}
             for a, b, keys in pairs
         ]
-        return [
-            {**r, "p_holm": p} for r, p in zip(rows, e.inferrer.correct_holm([r["p_value"] for r in rows]), strict=True)
-        ]
+        holm = multipletests([r["p_value"] for r in rows], method="holm")[1] if rows else []
+        return [{**r, "p_holm": float(p)} for r, p in zip(rows, holm, strict=True)]
 
     def tabulate_s1(self) -> None:
         e, runs = self.runner, {(r.model, r.dataset, r.condition): r for r in self.runner.expand_plan("S1")}
@@ -66,7 +67,11 @@ class Analyzer(BaseModel):
             for row in rows:
                 deltas[row["model"]].append(row["delta"])
             per_model = [
-                {"model": m, "mean_delta": float(np.mean(v)), "wilcoxon_p": e.inferrer.test_wilcoxon(v)}
+                {
+                    "model": m,
+                    "mean_delta": float(np.mean(v)),
+                    "wilcoxon_p": 1.0 if not any(v) else float(stats.wilcoxon(v).pvalue),
+                }
                 for m, v in deltas.items()
             ]
             self.reporter.write_table(f"{name}-models", per_model, f"TRICE vs {baseline} across datasets (Wilcoxon).")

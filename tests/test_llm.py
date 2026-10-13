@@ -4,6 +4,7 @@ from diskcache import Cache
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+from trice.config import ModelSpec
 from trice.core.encoders import ApiClient
 from trice.llm import LLM, Endpoint, OpenAITransport, Pinner
 from trice.schema import Prompt
@@ -72,29 +73,6 @@ def test_record_replay_and_audit(llm, transport):
     assert writer.complete(PROMPT) == first and len(transport.sent) == 2
 
 
-def test_pinner_prefers_precision_then_price(app):
-    pinner = Pinner(client=OpenAI(base_url="http://unused", api_key="x"), config=app.config.llm)
-    params = [*app.config.llm.required_parameters, "reasoning"]
-
-    def endpoint(name: str, quant: str, price: float, supported: list[str] = params) -> dict:
-        return {
-            "provider_name": name,
-            "quantization": quant,
-            "pricing": {"prompt": price, "completion": 1e-6},
-            "supported_parameters": supported,
-        }
-
-    choice = pinner.choose_endpoint(
-        [endpoint("Cheap", "fp8", 1e-8), endpoint("A", "bf16", 5e-8), endpoint("B", "bf16", 3e-8)], thinking=True
-    )
-    assert choice["provider_name"] == "B"
-    assert pinner.choose_endpoint([endpoint("NoSchema", "bf16", 1e-9, ["temperature"])], thinking=False) is None
-
-
-REQ = {"model": "m", "messages": []}
-OK = {"id": "x", "object": "chat.completion", "created": 0, "model": "m", "choices": []}
-
-
 class Network:
     """A real OpenAI client over a mock HTTP transport; counts requests that would leave the machine."""
 
@@ -111,6 +89,30 @@ class Network:
             max_retries=0,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
+
+
+def test_pinner_prefers_precision_then_price(app):
+    params = [*app.config.llm.required_parameters, "reasoning"]
+
+    def endpoint(name: str, quant: str, price: float, supported: list[str] = params) -> dict:
+        return {
+            "provider_name": name,
+            "quantization": quant,
+            "pricing": {"prompt": price, "completion": 1e-6},
+            "supported_parameters": supported,
+        }
+
+    spec = ModelSpec(openrouter="q/m", hf_repo="Q/M", ladder="t", params_b=1, active_params_b=1, thinking=True)
+    listing = [endpoint("Cheap", "fp8", 1e-8), endpoint("A", "bf16", 5e-8), endpoint("B", "bf16", 3e-8)]
+    pinner = Pinner(client=Network({"data": {"endpoints": listing}}).client, config=app.config.llm)
+    assert pinner.pin(spec, "rev").provider == "B"
+    unsupported = Network({"data": {"endpoints": [endpoint("NoSchema", "bf16", 1e-9, ["temperature"])]}})
+    pinner = Pinner(client=unsupported.client, config=app.config.llm)
+    assert pinner.pin(spec, "rev").backend == "local"  # no provider supports every parameter
+
+
+REQ = {"model": "m", "messages": []}
+OK = {"id": "x", "object": "chat.completion", "created": 0, "model": "m", "choices": []}
 
 
 def test_allow_spend_defaults_to_false(app):
@@ -148,14 +150,13 @@ def test_api_client_blocks_misses_but_replays_cache(tmp_path):
 
 def test_llm_replays_openrouter_cache_without_allow_spend(app, tmp_path):
     cache, net = Cache(tmp_path / "llm"), Network(OK)
-    transport = OpenAITransport(client=net.client, backend="openrouter")
-    live = LLM(endpoint=PINNED, transport=transport, cache=cache, config=app.config.llm)
+    blocked = OpenAITransport(client=net.client, backend="openrouter")
+    live = LLM(endpoint=PINNED, transport=blocked, cache=cache, config=app.config.llm)
     with pytest.raises(PermissionError):
         live.complete(PROMPT)
-    cache[live.hash_request(live.render_request(PROMPT))] = {
-        "choices": [{"message": {"content": "cached"}, "finish_reason": "stop"}]
-    }
-    assert live.complete(PROMPT).text == "cached"
+    recorded = Recording()
+    primed = LLM(endpoint=PINNED, transport=recorded, cache=cache, config=app.config.llm).complete(PROMPT)
+    assert live.complete(PROMPT) == primed and len(recorded.sent) == 1
     assert net.calls == 0
 
 

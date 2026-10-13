@@ -11,7 +11,6 @@ import scikit_posthocs as sp
 from pydantic import BaseModel
 from scipy import stats
 from statsmodels.stats.contingency_tables import mcnemar
-from statsmodels.stats.multitest import multipletests
 
 from trice.evaluation.scoring import Evaluator
 from trice.schema import derive_seed
@@ -94,14 +93,6 @@ class Inferrer(BaseModel):
                 rng=derive_seed("se", *seed),
             ).standard_error
         )
-
-    @staticmethod
-    def correct_holm(p_values: list[float]) -> list[float]:
-        return multipletests(p_values, method="holm")[1].tolist() if p_values else []
-
-    @staticmethod
-    def test_wilcoxon(deltas: list[float]) -> float:
-        return 1.0 if not any(deltas) else float(stats.wilcoxon(deltas).pvalue)
 
     @staticmethod
     def test_friedman(scores: pd.DataFrame) -> Friedman:

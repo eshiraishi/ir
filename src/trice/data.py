@@ -4,7 +4,6 @@ import hashlib
 import re
 import subprocess
 import urllib.request
-from collections.abc import Iterator
 from pathlib import Path
 
 from datasets import Dataset, DatasetDict
@@ -12,17 +11,6 @@ from pydantic import BaseModel
 
 from trice.config import DatasetSpec, SourceSpec
 from trice.schema import Example, LabelMap, Split, derive_seed
-
-
-def read_columns(content: str, order: str) -> Iterator[tuple[list[str], list[str]]]:
-    """``token<TAB>tag`` (or ``tag<TAB>token``) sentences separated by whitespace-only lines
-    (WNUT-17 uses a lone tab); skips -DOCSTART-."""
-    for block in re.split(r"\n\s*\n", content.replace("\r", "")):
-        rows = [line.strip().split("\t") for line in block.splitlines() if line.strip()]
-        rows = [r if order == "token_tag" else r[::-1] for r in rows]
-        rows = [r for r in rows if r[0] != "-DOCSTART-"]
-        if rows:
-            yield [r[0] for r in rows], [r[1] for r in rows]
 
 
 class Corpus(BaseModel):
@@ -59,10 +47,21 @@ class Corpus(BaseModel):
         spec = self.specs[name]
         splits: dict[str, Dataset] = {}
         for split, path in self.fetch(name).items():
-            rows = [
-                Example(id=f"{name}/{split}/{i:06d}", tokens=tokens, tags=tags)
-                for i, (tokens, tags) in enumerate(read_columns(path.read_text(encoding="utf-8"), spec.columns))
-            ]
+            # token<TAB>tag (or tag<TAB>token) sentences separated by whitespace-only lines
+            # (WNUT-17 uses a lone tab); -DOCSTART- is skipped.
+            rows = []
+            for block in re.split(r"\n\s*\n", path.read_text(encoding="utf-8").replace("\r", "")):
+                cells = [line.strip().split("\t") for line in block.splitlines() if line.strip()]
+                cells = [c if spec.columns == "token_tag" else c[::-1] for c in cells]
+                cells = [c for c in cells if c[0] != "-DOCSTART-"]
+                if cells:
+                    rows.append(
+                        Example(
+                            id=f"{name}/{split}/{len(rows):06d}",
+                            tokens=[c[0] for c in cells],
+                            tags=[c[1] for c in cells],
+                        )
+                    )
             unknown = {label for row in rows for label, _, _ in row.spans} - spec.labels.root.keys()
             if unknown:
                 raise ValueError(f"{name}/{split}: labels missing from trice.toml: {sorted(unknown)}")

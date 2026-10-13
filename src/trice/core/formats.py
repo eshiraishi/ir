@@ -81,24 +81,6 @@ def read_list(output: str) -> Candidates:
     return pairs, len(items) - len(pairs), not pairs
 
 
-def read_json(output: str) -> Candidates:
-    try:
-        items = json.loads(output)["entities"]
-    except json.JSONDecodeError, KeyError, TypeError:
-        return [], 0, True
-    pairs = [(i["text"], i["type"], -1) for i in items if isinstance(i, dict) and {"text", "type"} <= i.keys()]
-    return pairs, len(items) - len(pairs), False
-
-
-def read_inline(output: str) -> Candidates:
-    tag = r"</?[A-Za-z0-9_\-]+>"
-    pairs = [
-        (m[2], m[1], len(re.sub(tag, "", output[: m.start()]).split()))
-        for m in re.finditer(r"<([A-Za-z0-9_\-]+)>(.*?)</\1>", output)
-    ]
-    return pairs, 0, False
-
-
 class ListingFormat(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -165,7 +147,12 @@ class JsonFormat(BaseModel):
         return render_answer(self.env, self.name, labels, example)
 
     def parse_output(self, labels: LabelMap, output: str, query: Example) -> Parsed:
-        return align(read_json(output), labels, query)
+        try:
+            items = json.loads(output)["entities"]
+        except json.JSONDecodeError, KeyError, TypeError:
+            return align(([], 0, True), labels, query)
+        pairs = [(i["text"], i["type"], -1) for i in items if isinstance(i, dict) and {"text", "type"} <= i.keys()]
+        return align((pairs, len(items) - len(pairs), False), labels, query)
 
 
 class InlineFormat(BaseModel):
@@ -181,4 +168,9 @@ class InlineFormat(BaseModel):
         return render_answer(self.env, self.name, labels, example)
 
     def parse_output(self, labels: LabelMap, output: str, query: Example) -> Parsed:
-        return align(read_inline(output), labels, query)
+        tag = r"</?[A-Za-z0-9_\-]+>"
+        pairs = [
+            (m[2], m[1], len(re.sub(tag, "", output[: m.start()]).split()))
+            for m in re.finditer(r"<([A-Za-z0-9_\-]+)>(.*?)</\1>", output)
+        ]
+        return align((pairs, 0, False), labels, query)

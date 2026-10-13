@@ -19,14 +19,6 @@ from trice.evaluation.inference import Friedman
 from trice.schema import write_text
 
 
-def format_cell(value: object) -> str:
-    return f"{value:.4f}" if isinstance(value, float) else str(value)
-
-
-def escape_latex(value: object) -> str:
-    return "".join("\\" + c if c in "&%$#_{}" else c for c in str(value))
-
-
 class Reporter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
