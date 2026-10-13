@@ -1,8 +1,4 @@
-"""Run the configured baselines on the canonical datasets and write {id, entities} JSONL."""
-
-import json
-import tempfile
-from pathlib import Path
+"""Run the configured baselines on the canonical datasets and write one JSONL of predictions per system."""
 
 from datasets import load_from_disk
 from pydantic import BaseModel
@@ -10,52 +6,53 @@ from seqeval.metrics.sequence_labeling import get_entities
 from transformers import set_seed
 
 from baselines.config import Config
-from baselines.extractors import Gliner2Extractor, GlinerExtractor, Mention
+from baselines.extractors import Gliner2Extractor, GlinerExtractor, Mention, Prediction, TrainingRow
 
 
 class Benchmark(BaseModel):
     config: Config
 
-    def write_predictions(self, tag: str, dataset: str, ids: list[str], mentions: list[list[Mention]]) -> None:
-        out = self.config.layout.baselines / tag / f"{dataset}.jsonl"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
+    def write_predictions(self, system: str, dataset: str, ids: list[str], mentions: list[list[Mention]]) -> None:
+        self.config.layout.baselines.prepare(system=system, dataset=dataset).write_text(
             "".join(
-                json.dumps({"id": i, "entities": [m.model_dump() for m in found]}, ensure_ascii=False) + "\n"
+                Prediction(id=i, entities=found).model_dump_json() + "\n"
                 for i, found in zip(ids, mentions, strict=True)
             )
         )
 
     def predict(self, tag: str, datasets: list[str] | None) -> None:
         spec = self.config.baselines[tag]
-        extractor = {"gliner": GlinerExtractor, "gliner2": Gliner2Extractor}[spec.library](spec=spec)
+        match spec.library:
+            case "gliner":
+                extractor = GlinerExtractor(spec=spec)
+            case "gliner2":
+                extractor = Gliner2Extractor(spec=spec)
         set_seed(0, deterministic=True)
         for name, dataset in self.config.datasets.items():
             if not datasets or name in datasets:
-                test = load_from_disk(self.config.layout.canonical / name)["test"]
+                test = load_from_disk(self.config.layout.canonical.fill(dataset=name))["test"]
                 found = extractor.extract([" ".join(t) for t in test["tokens"]], sorted(dataset.labels.values()))
                 self.write_predictions(tag, name, test["id"], found)
 
     def finetune(self, tag: str, seed: int, datasets: list[str] | None) -> None:
-        spec = self.config.baselines[tag]
+        system = f"{tag}-ft-s{seed}"
         for name, dataset in self.config.datasets.items():
             if not datasets or name in datasets:
                 set_seed(seed, deterministic=True)
-                data = load_from_disk(self.config.layout.canonical / name)
-                extractor = GlinerExtractor(spec=spec)
-                with tempfile.TemporaryDirectory() as output:
-                    extractor.train(
-                        [
-                            {
-                                "tokenized_text": row["tokens"],
-                                "ner": [[s, e, dataset.labels[label]] for label, s, e in get_entities(row["tags"])],
-                            }
-                            for row in data["train"]
-                        ],
-                        seed,
-                        Path(output),
-                    )
+                data = load_from_disk(self.config.layout.canonical.fill(dataset=name))
+                extractor = GlinerExtractor(spec=self.config.baselines[tag])
+                extractor.train(
+                    [
+                        TrainingRow(
+                            tokenized_text=row["tokens"],
+                            ner=[(s, e, dataset.labels[label]) for label, s, e in get_entities(row["tags"])],
+                        )
+                        for row in data["train"]
+                    ],
+                    seed,
+                    self.config.layout.training.fill(system=system, dataset=name),
+                )
                 found = extractor.extract(
                     [" ".join(t) for t in data["test"]["tokens"]], sorted(dataset.labels.values())
                 )
-                self.write_predictions(f"{tag}-ft-s{seed}", name, data["test"]["id"], found)
+                self.write_predictions(system, name, data["test"]["id"], found)

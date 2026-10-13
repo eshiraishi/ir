@@ -17,8 +17,8 @@ The pre-registered design is in `docs/preregistration.md`.
 ## Design
 
 - **One config:** `trice.toml` holds every setting (datasets with pinned commits and SHA-256,
-  models, retrieval stacks, studies, sampling, statistics, and the `[layout]` of every file the
-  pipeline reads or writes). Secrets go in `.env` (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are
+  models, retrieval stacks, studies, sampling, statistics, and the `[layout]`: a path template for
+  every file the pipeline reads or writes, so no path is built in code). Secrets go in `.env` (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are
   parsed by `trice.config.Config` (pydantic-settings); nothing derives settings with functions.
 - **Composition root:** `trice.compose.compose` is one explicit function that builds and wires
   every component and returns them as an `App`; it is a context manager that closes the cache and

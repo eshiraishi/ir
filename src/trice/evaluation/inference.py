@@ -8,7 +8,7 @@ of sentences is small) and paired bootstrap apply directly to micro-F1.
 import numpy as np
 import pandas as pd
 import scikit_posthocs as sp
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from scipy import stats
 from statsmodels.stats.contingency_tables import mcnemar
 
@@ -26,10 +26,12 @@ class Comparison(BaseModel):
 
 
 class Friedman(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     statistic: float
     p_value: float
-    mean_ranks: dict[str, float]  # 1 = best
-    nemenyi: dict[str, dict[str, float]]
+    mean_ranks: pd.Series  # per treatment, 1 = best
+    nemenyi: pd.DataFrame  # pairwise post-hoc p-values
 
 
 class Trend(BaseModel):
@@ -101,8 +103,8 @@ class Inferrer(BaseModel):
         return Friedman(
             statistic=float(result.statistic),
             p_value=float(result.pvalue),
-            mean_ranks=scores.rank(axis=1, ascending=False).mean().to_dict(),
-            nemenyi=sp.posthoc_nemenyi_friedman(scores).to_dict(),
+            mean_ranks=scores.rank(axis=1, ascending=False).mean(),
+            nemenyi=sp.posthoc_nemenyi_friedman(scores),
         )
 
     @staticmethod

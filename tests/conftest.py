@@ -4,13 +4,13 @@ import pytest
 
 from trice.compose import App, compose
 from trice.config import Config
-from trice.schema import Example, LabelMap
+from trice.schema import Example, LabelMap, PathTemplate
 
 
 @pytest.fixture(scope="session")
 def app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[App]:
     base = Config()
-    layout = base.layout.model_copy(update={"cache": tmp_path_factory.mktemp("cache")})
+    layout = base.layout.model_copy(update={"cache": PathTemplate(str(tmp_path_factory.mktemp("cache")))})
     with compose(base.model_copy(update={"layout": layout})) as composed:
         yield composed
 

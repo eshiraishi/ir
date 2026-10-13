@@ -17,6 +17,20 @@ class Mention(BaseModel):
     label: str
 
 
+class Prediction(BaseModel):
+    """One line of results/baselines (read by `trice baselines`)."""
+
+    id: str
+    entities: list[Mention]
+
+
+class TrainingRow(BaseModel):
+    """GLiNER's training format: tokens and [first, last (inclusive), type] spans."""
+
+    tokenized_text: list[str]
+    ner: list[tuple[int, int, str]]
+
+
 @runtime_checkable
 class Extractor(Protocol):
     def extract(self, texts: list[str], types: list[str]) -> list[list[Mention]]: ...
@@ -33,9 +47,14 @@ class GlinerExtractor(BaseModel):
     def model(self) -> GLiNER:
         return GLiNER.from_pretrained(self.spec.model, revision=self.spec.revision)
 
-    def train(self, rows: list[dict], seed: int, output: Path) -> None:
+    def train(self, rows: list[TrainingRow], seed: int, output: Path) -> None:
         self.model.train_model(
-            train_dataset=rows, eval_dataset=None, output_dir=output, seed=seed, data_seed=seed, save_strategy="no"
+            train_dataset=[r.model_dump() for r in rows],
+            eval_dataset=None,
+            output_dir=output,
+            seed=seed,
+            data_seed=seed,
+            save_strategy="no",
         )
 
     def extract(self, texts: list[str], types: list[str]) -> list[list[Mention]]:

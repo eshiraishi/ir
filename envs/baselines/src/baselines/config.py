@@ -3,13 +3,29 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, RootModel
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict, TomlConfigSettingsSource
 
 
+class PathTemplate(RootModel[str]):
+    """A relative path with ``{placeholders}`` (the same type as the core's, which this image cannot import)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    def fill(self, **fields: object) -> Path:
+        return Path(self.root.format(**fields))
+
+    def prepare(self, **fields: object) -> Path:
+        """The path to write to, with its directory created."""
+        path = self.fill(**fields)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+
 class Layout(BaseModel):
-    canonical: Path
-    baselines: Path
+    canonical: PathTemplate
+    baselines: PathTemplate
+    training: PathTemplate
 
 
 class DatasetSpec(BaseModel):

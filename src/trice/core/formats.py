@@ -7,18 +7,28 @@ P2  chat template + strict JSON Schema (structured generation) with a label enum
 P3  chat template + inline tags: the text repeated with ``<label>...</label>``.
 """
 
-import json
 import re
 from typing import Literal, Protocol, runtime_checkable
 
 from jinja2 import Environment
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from trice.schema import Example, FormatName, LabelMap, Parsed, Prompt
+from trice.schema import Example, FormatName, LabelMap, Message, Parsed, Prompt
 
 Candidates = tuple[
     list[tuple[str, str, int]], int, bool
 ]  # (span, label, token position or -1), broken items, malformed
+
+
+class JsonEntity(BaseModel):
+    text: str
+    type: str
+
+
+class JsonAnswer(BaseModel):
+    """The P2 output; items that are not {text, type} objects are kept to be counted as invalid."""
+
+    entities: list[JsonEntity | object]
 
 
 @runtime_checkable
@@ -39,16 +49,16 @@ def render_answer(env: Environment, name: FormatName, labels: LabelMap, example:
 
 def render_chat(
     env: Environment, name: FormatName, labels: LabelMap, demos: list[Example], query: Example
-) -> list[dict]:
+) -> list[Message]:
     types = labels.types
     system = env.get_template("system.j2").render(fmt=name, types=types, tags=[labels.tag(t) for t in types])
-    messages = [{"role": "system", "content": system}]
+    messages = [Message(role="system", content=system)]
     for demo in demos:
         messages += [
-            {"role": "user", "content": demo.text},
-            {"role": "assistant", "content": render_answer(env, name, labels, demo)},
+            Message(role="user", content=demo.text),
+            Message(role="assistant", content=render_answer(env, name, labels, demo)),
         ]
-    return [*messages, {"role": "user", "content": query.text}]
+    return [*messages, Message(role="user", content=query.text)]
 
 
 def align(candidates: Candidates, labels: LabelMap, query: Example) -> Parsed:
@@ -91,7 +101,7 @@ class ListingFormat(BaseModel):
         content = self.env.get_template("p0.j2").render(
             types=labels.types, demos=[labels.describe(d) for d in demos], query=query.text
         )
-        return Prompt(messages=[{"role": "user", "content": content}], stop=["\nExample "])
+        return Prompt(messages=[Message(role="user", content=content)], stop=["\nExample "])
 
     def render_answer(self, labels: LabelMap, example: Example) -> str:
         return render_answer(self.env, self.name, labels, example)
@@ -148,10 +158,10 @@ class JsonFormat(BaseModel):
 
     def parse_output(self, labels: LabelMap, output: str, query: Example) -> Parsed:
         try:
-            items = json.loads(output)["entities"]
-        except json.JSONDecodeError, KeyError, TypeError:
+            items = JsonAnswer.model_validate_json(output).entities
+        except ValidationError:
             return align(([], 0, True), labels, query)
-        pairs = [(i["text"], i["type"], -1) for i in items if isinstance(i, dict) and {"text", "type"} <= i.keys()]
+        pairs = [(i.text, i.type, -1) for i in items if isinstance(i, JsonEntity)]
         return align((pairs, len(items) - len(pairs), False), labels, query)
 
 

@@ -3,9 +3,11 @@ import itertools
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
 from trice.evaluation.inference import Inferrer
 from trice.evaluation.scoring import Evaluator
+from trice.schema import PathTemplate
 
 
 def counts(n: int, p_tp: float, seed: int) -> np.ndarray:
@@ -56,15 +58,28 @@ def test_omnibus_and_trend_tests():
     assert trend.p_increasing < 0.01 < trend.p_decreasing
 
 
+class Row(BaseModel):
+    model: str
+    f1: float
+
+
+class Point(BaseModel):
+    k: int
+    f1: float
+    curve: str
+
+
 def test_reporter_writes_tables_and_tikz(app, tmp_path):
-    reporter = app.analyzer.reporter.model_copy(update={"out": tmp_path})
-    reporter.write_table("t", [{"model": "m_1", "f1": 0.12345}], "Caption & more")
+    reporter = app.analyzer.reporter.model_copy(update={"tables": PathTemplate(f"{tmp_path}/{{name}}.{{suffix}}")})
+    reporter.write_table("t", [Row(model="m_1", f1=0.12345)], "Caption & more")
     assert "0.1235" in (tmp_path / "t.md").read_text()
     assert r"m\_1" in (tmp_path / "t.tex").read_text()
-    data = pd.DataFrame(
-        {"k": [0, 1, 2, 0, 1, 2], "f1": [0.1, 0.3, 0.4, 0.2, 0.3, 0.35], "curve": ["a"] * 3 + ["b"] * 3}
-    )
-    reporter.plot_lines("curves", data, x="k", y="f1", hue="curve")
+    points = [
+        Point(k=k, f1=f, curve=c)
+        for c, fs in (("a", [0.1, 0.3, 0.4]), ("b", [0.2, 0.3, 0.35]))
+        for k, f in enumerate(fs)
+    ]
+    reporter.plot_lines("curves", points, x="k", y="f1", hue="curve")
     assert "\\begin{tikzpicture}" in (tmp_path / "curves.tex").read_text()
     reporter.plot_critical_difference(
         "cd",

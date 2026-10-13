@@ -2,7 +2,6 @@
 hosted large stack (OpenRouter through the OpenAI client). All run deterministically in fp32."""
 
 import hashlib
-import json
 from functools import cached_property
 
 import bm25s
@@ -16,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from sentence_transformers import SentenceTransformer, SparseEncoder
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
 
-from trice.schema import ModelRef, Runtime
+from trice.schema import Message, ModelRef, Runtime
 
 
 def fix_determinism(runtime: Runtime) -> None:
@@ -123,8 +122,10 @@ class QwenReranker(BaseModel):
         texts = [
             self.tokenizer.apply_chat_template(
                 [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user.render(instruction=self.instruction, query=query, document=doc)},
+                    Message(role="system", content=system).model_dump(),
+                    Message(
+                        role="user", content=user.render(instruction=self.instruction, query=query, document=doc)
+                    ).model_dump(),
                 ],
                 tokenize=False,
                 add_generation_prompt=True,
@@ -144,6 +145,35 @@ class QwenReranker(BaseModel):
         return np.concatenate(scores) if scores else np.zeros(0)
 
 
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: list[str]
+
+
+class EmbeddingRow(BaseModel):
+    index: int
+    embedding: list[float]
+
+
+class EmbeddingResponse(BaseModel):
+    data: list[EmbeddingRow]
+
+
+class RerankRequest(BaseModel):
+    model: str
+    query: str
+    documents: list[str]
+
+
+class RerankRow(BaseModel):
+    index: int
+    relevance_score: float
+
+
+class RerankResponse(BaseModel):
+    results: list[RerankRow]
+
+
 class ApiClient(BaseModel):
     """The OpenAI-compatible client for hosted models, with every raw response cached."""
 
@@ -153,13 +183,13 @@ class ApiClient(BaseModel):
     cache: Cache
     allow_spend: bool = False
 
-    def post(self, path: str, body: dict) -> dict:
-        key = hashlib.sha256(json.dumps([path, body], sort_keys=True).encode()).hexdigest()
+    def post[T: BaseModel](self, path: str, body: BaseModel, response: type[T]) -> T:
+        key = hashlib.sha256(f"{path}|{body.model_dump_json()}".encode()).hexdigest()
         if key not in self.cache:
             if not self.allow_spend:
                 raise PermissionError("OpenRouter requests are blocked: llm.allow_spend is false in trice.toml")
-            self.cache[key] = self.client.post(path, body=body, cast_to=dict)
-        return self.cache[key]
+            self.cache[key] = self.client.post(path, body=body.model_dump(), cast_to=dict)
+        return response.model_validate(self.cache[key])
 
 
 class ApiScorer(BaseModel):
@@ -171,12 +201,11 @@ class ApiScorer(BaseModel):
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         def embed(texts: list[str]) -> np.ndarray:
-            rows = []
+            rows: list[list[float]] = []
             for i in range(0, len(texts), self.batch_size):
-                body = {"model": self.model_id, "input": texts[i : i + self.batch_size]}
-                rows += [
-                    r["embedding"] for r in sorted(self.api.post("/embeddings", body)["data"], key=lambda r: r["index"])
-                ]
+                body = EmbeddingRequest(model=self.model_id, input=texts[i : i + self.batch_size])
+                response = self.api.post("/embeddings", body, EmbeddingResponse)
+                rows += [r.embedding for r in sorted(response.data, key=lambda r: r.index)]
             m = np.asarray(rows)
             return m / np.linalg.norm(m, axis=1, keepdims=True)
 
@@ -192,8 +221,10 @@ class ApiReranker(BaseModel):
     model_id: str
 
     def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
-        body = {"model": self.model_id, "query": query, "documents": docs}
+        response = self.api.post(
+            "/rerank", RerankRequest(model=self.model_id, query=query, documents=docs), RerankResponse
+        )
         scores = np.zeros(len(docs))
-        for r in self.api.post("/rerank", body)["results"]:
-            scores[r["index"]] = r["relevance_score"]
+        for r in response.results:
+            scores[r.index] = r.relevance_score
         return scores

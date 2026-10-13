@@ -17,12 +17,12 @@ from trice.budget import Budget
 from trice.config import BM25Stack, Config, DenseStack, TriceStack
 from trice.core.encoders import ApiClient, ApiReranker, ApiScorer, BM25Scorer, DenseScorer, QwenReranker, SparseScorer
 from trice.core.formats import Format, InlineFormat, JsonFormat, ListFormat, ListingFormat
-from trice.core.retrieval import Reranker, Retriever, Scorer
+from trice.core.retrieval import Reranker, Retriever, Scorer, Stage
 from trice.data import Corpus
 from trice.evaluation.inference import Inferrer
 from trice.evaluation.report import Reporter
 from trice.evaluation.scoring import Evaluator
-from trice.llm import LLM, Endpoint, OpenAITransport, Pinner, Transport
+from trice.llm import LLM, Endpoint, EndpointTable, OpenAITransport, Pinner, Transport
 from trice.runner import Runner
 from trice.schema import FormatName, ModelRef
 
@@ -34,7 +34,7 @@ class App(BaseModel):
     corpus: Corpus
     formats: dict[FormatName, Format]
     retrievers: dict[str, Retriever]
-    endpoints: dict[str, Endpoint]
+    endpoints: list[Endpoint]
     llms: dict[str, LLM]
     pinner: Pinner
     runner: Runner
@@ -56,7 +56,7 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
         )
 
         # Network and storage: one client per backend, one record/replay cache.
-        cache = stack.enter_context(Cache(layout.cache))
+        cache = stack.enter_context(Cache(layout.cache.fill()))
         openrouter = stack.enter_context(
             OpenAI(
                 base_url=llm.openrouter_url,
@@ -65,15 +65,11 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
                 timeout=llm.timeout,
             )
         )
-        transports = {
-            "openrouter": transport
-            or OpenAITransport(client=openrouter, backend="openrouter", allow_spend=llm.allow_spend),
-            "local": transport
-            or OpenAITransport(
-                client=stack.enter_context(OpenAI(base_url=llm.local_url, api_key="local", timeout=llm.timeout)),
-                backend="local",
-            ),
-        }
+        hosted = transport or OpenAITransport(client=openrouter, backend="openrouter", allow_spend=llm.allow_spend)
+        local = transport or OpenAITransport(
+            client=stack.enter_context(OpenAI(base_url=llm.local_url, api_key="local", timeout=llm.timeout)),
+            backend="local",
+        )
 
         # Data and prompt formats (the order is the order of the S0 candidates).
         corpus = Corpus(raw=layout.raw, canonical=layout.canonical, sources=config.sources, specs=config.datasets)
@@ -103,12 +99,18 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
         for name, spec in retrieval.stacks.items():
             match spec:
                 case TriceStack():
-                    stages = {"sparse": scorer(spec.sparse, "sparse"), "dense": scorer(spec.dense, "dense")}
+                    stages = [
+                        Stage(name="sparse", scorer=scorer(spec.sparse, "sparse")),
+                        Stage(name="dense", scorer=scorer(spec.dense, "dense")),
+                    ]
                     ranker = reranker(spec.reranker)
                 case BM25Stack():
-                    stages, ranker = {"bm25": BM25Scorer(k1=spec.k1, b=spec.b)}, None
+                    stages, ranker = [Stage(name="bm25", scorer=BM25Scorer(k1=spec.k1, b=spec.b))], None
                 case DenseStack():
-                    stages, ranker = {"dense": scorer(spec.dense, "dense", spec.query_instruction)}, None
+                    stages, ranker = (
+                        [Stage(name="dense", scorer=scorer(spec.dense, "dense", spec.query_instruction))],
+                        None,
+                    )
             retrievers[name] = Retriever(
                 stages=stages,
                 reranker=ranker,
@@ -118,10 +120,11 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
             )
 
         # Model calls: the pinned endpoint of every model (written by `trice pin`).
-        endpoints = {
-            model: Endpoint.model_validate(pin)
-            for model, pin in (json.loads(layout.endpoints.read_text()) if layout.endpoints.exists() else {}).items()
-        }
+        endpoints = (
+            EndpointTable.model_validate_json(layout.endpoints.fill().read_text()).root
+            if layout.endpoints.fill().exists()
+            else []
+        )
 
         # Studies, budget and analysis.
         runner = Runner(
@@ -139,11 +142,13 @@ def compose(config: Config, transport: Transport | None = None) -> Generator[App
             retrievers=retrievers,
             endpoints=endpoints,
             llms={
-                model: LLM(endpoint=endpoint, transport=transports[endpoint.backend], cache=cache, config=llm)
-                for model, endpoint in endpoints.items()
+                e.name: LLM(
+                    endpoint=e, transport=hosted if e.backend == "openrouter" else local, cache=cache, config=llm
+                )
+                for e in endpoints
             },
             pinner=Pinner(client=openrouter, config=llm),
             runner=runner,
             budget=Budget(runner=runner, env=env, endpoints=endpoints),
-            analyzer=Analyzer(runner=runner, reporter=Reporter(env=env, out=layout.tables)),
+            analyzer=Analyzer(runner=runner, reporter=Reporter(env=env, tables=layout.tables)),
         )

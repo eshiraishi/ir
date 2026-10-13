@@ -21,10 +21,24 @@ def derive_seed(*parts: object) -> int:
     return int(hashlib.sha256("|".join(map(str, parts)).encode()).hexdigest()[:8], 16)
 
 
-def write_text(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    return path
+class PathTemplate(RootModel[str]):
+    """A relative path with ``{placeholders}``, as written in the [layout] of trice.toml. Every file
+    the pipeline reads or writes is named by one, so no path is built anywhere else."""
+
+    model_config = ConfigDict(frozen=True)
+
+    def fill(self, **fields: object) -> Path:
+        return Path(self.root.format(**fields))
+
+    def prepare(self, **fields: object) -> Path:
+        """The path to write to, with its directory created."""
+        path = self.fill(**fields)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def match(self, **fields: object) -> list[Path]:
+        """Existing files; a field set to ``*`` acts as a glob wildcard."""
+        return sorted(Path().glob(self.root.format(**fields)))
 
 
 class ModelRef(BaseModel):
@@ -131,8 +145,21 @@ class Run(BaseModel):
         return f"{self.model}/{self.dataset}/{self.queries}/{cond}/{self.fmt}/k{self.k}"
 
 
+class Message(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class Ranking(BaseModel):
+    """Pool ids for one query at one retrieval stage, best first."""
+
+    query_id: str
+    stage: str
+    ids: list[str]
+
+
 class Prompt(BaseModel):
-    messages: list[dict[str, str]]
+    messages: list[Message]
     response_format: dict | None = None
     stop: list[str] | None = None
 
