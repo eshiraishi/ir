@@ -34,7 +34,9 @@ class SparseScorer(BaseModel):
     @cached_property
     def model(self) -> SparseEncoder:
         fix_determinism(self.runtime)
-        return SparseEncoder(self.ref.id, revision=self.ref.revision, device=self.runtime.device)
+        return SparseEncoder(
+            self.ref.id, revision=self.ref.revision, device=self.runtime.device, trust_remote_code=True
+        )
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         size = self.runtime.batch_size
