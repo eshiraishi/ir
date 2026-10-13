@@ -157,3 +157,18 @@ def test_llm_replays_openrouter_cache_without_allow_spend(app, tmp_path):
     }
     assert live.complete(PROMPT).text == "cached"
     assert net.calls == 0
+
+
+def test_pinner_falls_back_to_local_when_model_not_on_openrouter(app):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "Not Found", "code": 404}})
+
+    client = OpenAI(
+        base_url="http://mock/v1",
+        api_key="x",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    spec = app.config.models["qwen3.5-2b"]
+    pin = Pinner(client=client, config=app.config.llm).pin(spec, "abc")
+    assert (pin.backend, pin.model, pin.hf_revision) == ("local", spec.hf_repo, "abc")

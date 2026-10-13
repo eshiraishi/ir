@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol, cast, runtime_checkable
 
 from diskcache import Cache
-from openai import OpenAI
+from openai import NotFoundError, OpenAI
 from pydantic import BaseModel, ConfigDict
 
 from trice.config import LLMConfig, ModelSpec
@@ -144,8 +144,11 @@ class Pinner(BaseModel):
         return min(ok, key=preference) if ok else None
 
     def pin(self, spec: ModelSpec, revision: str | None) -> Endpoint:
-        data = cast(dict, self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=object))
-        chosen = self.choose_endpoint(data["data"]["endpoints"], spec.thinking)
+        try:
+            data = cast(dict, self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=object))
+            chosen = self.choose_endpoint(data["data"]["endpoints"], spec.thinking)
+        except NotFoundError:  # the model is not listed on OpenRouter at all
+            chosen = None
         if chosen is None:
             return Endpoint(backend="local", model=spec.hf_repo, thinking=spec.thinking, hf_revision=revision)
         return Endpoint(
