@@ -10,7 +10,7 @@ from seqeval.metrics.sequence_labeling import get_entities
 
 
 class Evaluator(BaseModel):
-    def counts(self, predictions: list[list[str]], references: list[list[str]]) -> np.ndarray:
+    def count_matches(self, predictions: list[list[str]], references: list[list[str]]) -> np.ndarray:
         """(n_sentences, 3) array of per-sentence (tp, fp, fn)."""
         rows = []
         for pred, gold in zip(predictions, references, strict=True):
@@ -19,7 +19,7 @@ class Evaluator(BaseModel):
         return np.array(rows, dtype=np.int64).reshape(-1, 3)
 
     @staticmethod
-    def f1(sums: np.ndarray) -> np.ndarray:
+    def compute_f1(sums: np.ndarray) -> np.ndarray:
         """Micro-F1 of summed (tp, fp, fn), vectorized over leading axes."""
         tp, fp, fn = sums[..., 0], sums[..., 1], sums[..., 2]
         denom = 2 * tp + fp + fn

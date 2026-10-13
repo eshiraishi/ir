@@ -5,16 +5,37 @@ under the hash of its canonical request, so analyses replay byte-identically."""
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, cast
+from typing import Protocol, cast, runtime_checkable
 
 from diskcache import Cache
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
 
-from trice.schema import Completion, Prompt
-from trice.settings import Backend, LLMSettings, ModelSpec
+from trice.config import LLMConfig, ModelSpec
+from trice.schema import Backend, Completion, Mode, Prompt
 
-Mode = Literal["readwrite", "replay", "bypass"]
+
+@runtime_checkable
+class Transport(Protocol):
+    def send(self, request: dict) -> dict:
+        """One chat-completions request in, the raw response out."""
+        ...
+
+
+@runtime_checkable
+class Completer(Protocol):
+    def complete(self, prompt: Prompt, audit_tag: str = "") -> Completion: ...
+
+    def complete_many(self, prompts: list[Prompt], audit_tag: str = "") -> list[Completion]: ...
+
+
+class OpenAITransport(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    client: OpenAI
+
+    def send(self, request: dict) -> dict:
+        return self.client.chat.completions.create(**request).model_dump()
 
 
 class Endpoint(BaseModel):
@@ -34,12 +55,12 @@ class LLM(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     endpoint: Endpoint
-    client: OpenAI
+    transport: Transport
     cache: Cache
-    settings: LLMSettings
+    config: LLMConfig
     mode: Mode = "readwrite"
 
-    def request(self, prompt: Prompt) -> dict:
+    def render_request(self, prompt: Prompt) -> dict:
         extra: dict = {}
         if self.endpoint.backend == "openrouter":
             extra["provider"] = {
@@ -57,37 +78,34 @@ class LLM(BaseModel):
         return {
             "model": self.endpoint.model,
             "messages": prompt.messages,
-            "temperature": self.settings.temperature,
-            "top_p": self.settings.top_p,
-            "seed": self.settings.seed,
-            "max_tokens": self.settings.max_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "seed": self.config.seed,
+            "max_tokens": self.config.max_tokens,
             "extra_body": extra,
             **{k: v for k, v in optional.items() if v is not None},
         }
 
-    def key(self, request: dict) -> str:
+    def hash_request(self, request: dict) -> str:
         return hashlib.sha256(json.dumps([self.endpoint.backend, request], sort_keys=True).encode()).hexdigest()
 
-    def send(self, request: dict) -> dict:
-        return self.client.chat.completions.create(**request).model_dump()
-
     def complete(self, prompt: Prompt, audit_tag: str = "") -> Completion:
-        request = self.request(prompt)
-        key = self.key(request)
+        request = self.render_request(prompt)
+        key = self.hash_request(request)
         if self.mode != "bypass" and key in self.cache:
-            return self.completion(self.cache[key])
+            return self.parse_completion(self.cache[key])
         if self.mode == "replay":
             raise LookupError(f"replay miss for request {key}")
-        data = self.send(request)
+        data = self.transport.send(request)
         self.cache[f"audit/{audit_tag}/{key}" if self.mode == "bypass" else key] = data
-        return self.completion(data)
+        return self.parse_completion(data)
 
     def complete_many(self, prompts: list[Prompt], audit_tag: str = "") -> list[Completion]:
-        with ThreadPoolExecutor(self.settings.workers) as pool:
+        with ThreadPoolExecutor(self.config.workers) as pool:
             return list(pool.map(lambda p: self.complete(p, audit_tag), prompts))
 
     @staticmethod
-    def completion(data: dict) -> Completion:
+    def parse_completion(data: dict) -> Completion:
         choice, usage = data["choices"][0], data.get("usage") or {}
         return Completion(
             text=choice["message"].get("content") or "",
@@ -106,11 +124,11 @@ class Pinner(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     client: OpenAI
-    settings: LLMSettings
+    config: LLMConfig
 
-    def choose(self, endpoints: list[dict], thinking: bool) -> dict | None:
-        required = set(self.settings.required_parameters) | ({"reasoning"} if thinking else set())
-        prefs = self.settings.quantization_preference
+    def choose_endpoint(self, endpoints: list[dict], thinking: bool) -> dict | None:
+        required = set(self.config.required_parameters) | ({"reasoning"} if thinking else set())
+        prefs = self.config.quantization_preference
         ok = [e for e in endpoints if required <= set(e.get("supported_parameters") or [])]
 
         def preference(e: dict) -> tuple:
@@ -123,7 +141,7 @@ class Pinner(BaseModel):
 
     def pin(self, spec: ModelSpec, revision: str | None) -> Endpoint:
         data = cast(dict, self.client.get(f"/models/{spec.openrouter}/endpoints", cast_to=object))
-        chosen = self.choose(data["data"]["endpoints"], spec.thinking)
+        chosen = self.choose_endpoint(data["data"]["endpoints"], spec.thinking)
         if chosen is None:
             return Endpoint(backend="local", model=spec.hf_repo, thinking=spec.thinking, hf_revision=revision)
         return Endpoint(

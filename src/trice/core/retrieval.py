@@ -3,6 +3,8 @@
 Pure ranking logic; the scorers themselves (models, APIs) live in core/encoders.py.
 """
 
+from typing import Protocol, runtime_checkable
+
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
@@ -11,26 +13,24 @@ from trice.schema import Condition, Example, derive_seed
 Ranking = dict[str, list[str]]  # stage -> pool ids, best first
 
 
-class Scorer(BaseModel):
-    """Relevance of every pool text to every query text: an (n_queries, n_pool) array."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
+@runtime_checkable
+class Scorer(Protocol):
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
-        raise NotImplementedError
+        """Relevance of every pool text to every query text: an (n_queries, n_pool) array."""
+        ...
 
 
-class Reranker(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
-        raise NotImplementedError
+@runtime_checkable
+class Reranker(Protocol):
+    def score_pairs(self, query: str, docs: list[str]) -> np.ndarray: ...
 
 
 class Retriever(BaseModel):
     """Stages ``sparse``/``dense``/... (full-pool scores), ``rrf`` (exact RRF over full-pool ranks)
     and ``full`` (reranker over the top fused candidates). A single first stage is stored as
     ``full``. Leave-one-out queries never see themselves or pool sentences with identical text."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     stages: dict[str, Scorer]
     reranker: Reranker | None = None
@@ -72,7 +72,7 @@ class Retriever(BaseModel):
         return rankings
 
 
-def demonstrations(
+def select_demonstrations(
     condition: Condition, k: int, dataset: str, query: Example, pool: list[Example], ranking: Ranking | None
 ) -> list[Example]:
     """The k demonstrations for one query, shuffled with the per-query seed so their order never

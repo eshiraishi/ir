@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 from conftest import example
+from pydantic import BaseModel
 
-from trice.core.prompting import Labels
-from trice.core.retrieval import Reranker, Retriever, Scorer, demonstrations
+from trice.core.retrieval import Retriever, select_demonstrations
 from trice.core.selection import select_format, select_k
 from trice.schema import Condition
 
@@ -20,15 +20,15 @@ def test_labels_resolve_any_alias(labels):
 
 @pytest.mark.parametrize("fmt", ["P0", "P1", "P2", "P3"])
 @pytest.mark.parametrize("sentence", [S1, S2, S3])
-def test_render_then_parse_roundtrip(container, labels, fmt, sentence):
-    prompter = container.experiment.prompter
-    parsed = prompter.parse(fmt, prompter.answer(fmt, sentence, labels), sentence, labels)
+def test_render_then_parse_roundtrip(app, labels, fmt, sentence):
+    format = app.formats[fmt]
+    parsed = format.parse_output(labels, format.render_answer(labels, sentence), sentence)
     assert parsed.tags == sentence.tags
     assert parsed.invalid == 0 and not parsed.malformed
 
 
-def test_p0_reproduces_v1_listing(container, labels):
-    prompt = container.experiment.prompter.prompt("P0", labels, [S1], example(9, ["Mary", "went", "to", "Paris", "."]))
+def test_p0_reproduces_v1_listing(app, labels):
+    prompt = app.formats["P0"].render_prompt(labels, [S1], example(9, ["Mary", "went", "to", "Paris", "."]))
     assert prompt.stop == ["\nExample "]
     assert prompt.messages[0]["content"] == (
         "Defn: An entity is a location, person, or programming language.\n"
@@ -38,44 +38,44 @@ def test_p0_reproduces_v1_listing(container, labels):
     )
 
 
-def test_chat_formats(container, labels):
-    prompter = container.experiment.prompter
-    assert prompter.answer("P3", S1, labels) == "<person>John Smith</person> visited <location>New York</location> ."
-    assert prompter.answer("P2", S2, labels) == '{"entities": []}'
+def test_chat_formats(app, labels):
+    assert app.formats["P3"].render_answer(labels, S1) == (
+        "<person>John Smith</person> visited <location>New York</location> ."
+    )
+    assert app.formats["P2"].render_answer(labels, S2) == '{"entities": []}'
     for fmt in ("P1", "P2", "P3"):
-        prompt = prompter.prompt(fmt, labels, [S1, S2], S3)
+        prompt = app.formats[fmt].render_prompt(labels, [S1, S2], S3)
         assert [m["role"] for m in prompt.messages] == ["system", "user", "assistant", "user", "assistant", "user"]
         assert (prompt.response_format is not None) == (fmt == "P2")
 
 
-def test_parse_counts_invalid_mentions(container, labels):
+def test_parse_counts_invalid_mentions(app, labels):
     out = "1. John Smith (person)\n2. Boston (location)\n3. New York (city)\nchatter"
-    parsed = container.experiment.prompter.parse("P1", out, S1, labels)
+    parsed = app.formats["P1"].parse_output(labels, out, S1)
     assert parsed.tags == ["B-PER", "I-PER", "O", "O", "O", "O"]
     assert (parsed.candidates, parsed.invalid) == (4, 3)
-    assert container.experiment.prompter.parse("P2", "not json", S1, labels).malformed
+    assert app.formats["P2"].parse_output(labels, "not json", S1).malformed
 
 
 @pytest.mark.parametrize("dataset", ["crossner_ai", "crossner_music", "conll2003", "wnut17", "ncbi_disease"])
-def test_roundtrip_on_real_data(container, dataset):
+def test_roundtrip_on_real_data(app, dataset):
     """P3 carries positions and is exact; list/JSON formats can only miss repeated surface forms."""
-    if not (container.settings.paths.data / "canonical" / dataset).exists():
+    if not (app.config.layout.canonical / dataset).exists():
         pytest.skip("run `trice data` first")
-    prompter, labels = (container.experiment.prompter, Labels(raw_to_verbal=container.corpus.labels(dataset)))
-    examples = container.corpus.load(dataset, "train")[:1500]
-    for fmt in ("P0", "P1", "P2", "P3"):
-        wrong = sum(prompter.parse(fmt, prompter.answer(fmt, e, labels), e, labels).tags != e.tags for e in examples)
+    labels, examples = app.corpus.load_labels(dataset), app.corpus.load(dataset, "train")[:1500]
+    for fmt, format in app.formats.items():
+        wrong = sum(format.parse_output(labels, format.render_answer(labels, e), e).tags != e.tags for e in examples)
         assert wrong == 0 if fmt == "P3" else wrong <= 3, (fmt, wrong)
 
 
-class Fixed(Scorer):
+class Fixed(BaseModel):
     sign: float
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         return np.tile(self.sign * np.arange(len(pool), dtype=float), (len(queries), 1))
 
 
-class EvenFirst(Reranker):
+class EvenFirst(BaseModel):
     def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
         return np.array([float(int(d.split()[0][1:]) % 2 == 0) for d in docs])
 
@@ -113,17 +113,17 @@ def test_rrf_matches_formula():
 
 def test_demonstrations_are_seeded_and_order_free():
     random0 = Condition.parse("random:0")
-    a = demonstrations(random0, 3, "d", POOL[0], POOL, None)
-    assert a == demonstrations(random0, 3, "d", POOL[0], list(reversed(POOL)), None)
+    a = select_demonstrations(random0, 3, "d", POOL[0], POOL, None)
+    assert a == select_demonstrations(random0, 3, "d", POOL[0], list(reversed(POOL)), None)
     assert all(d.text != POOL[0].text for d in a)
-    assert a != demonstrations(Condition.parse("random:1"), 3, "d", POOL[0], POOL, None)
+    assert a != select_demonstrations(Condition.parse("random:1"), 3, "d", POOL[0], POOL, None)
     ranking = {"full": [p.id for p in POOL[1:5]]}
-    shuffled = demonstrations(Condition.parse("small/full"), 3, "d", POOL[0], POOL, ranking)
-    reversed_rank = demonstrations(
+    shuffled = select_demonstrations(Condition.parse("small/full"), 3, "d", POOL[0], POOL, ranking)
+    reversed_rank = select_demonstrations(
         Condition.parse("small/full"), 3, "d", POOL[0], POOL, {"full": ranking["full"][:3][::-1]}
     )
     assert shuffled == reversed_rank  # order depends on the set, never on rank
-    assert demonstrations(Condition.parse("zero_shot"), 3, "d", POOL[0], POOL, None) == []
+    assert select_demonstrations(Condition.parse("zero_shot"), 3, "d", POOL[0], POOL, None) == []
     with pytest.raises(ValueError, match="bad condition"):
         Condition.parse("small")
 

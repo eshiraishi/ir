@@ -12,7 +12,7 @@
 | Models, OpenRouter providers and quantizations, HF tokenizer revisions | `trice.toml` `[models]`, `results/endpoints.json` |
 | Retrieval stacks, model revisions, RRF k=60, rerank depth 200, reranker instruction | `trice.toml` `[retrieval]` |
 | Study definitions, k grid, LOO query count, pool sizes | `trice.toml` `[studies]`, `[selection]` |
-| Prompt formats P0-P3, parsers, scorer | `src/trice/templates/`, `src/trice/core/prompting.py`, `src/trice/evaluation/scoring.py` |
+| Prompt formats P0-P3, parsers, scorer | `src/trice/templates/`, `src/trice/core/formats.py`, `src/trice/evaluation/scoring.py` |
 | Seeds | derived only via `trice.schema.derive_seed(purpose, ...)` |
 
 Two decisions are made on training data **after** this tag and are themselves pre-registered

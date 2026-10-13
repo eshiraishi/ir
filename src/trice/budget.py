@@ -11,14 +11,13 @@ import random
 from collections import defaultdict
 from typing import Any
 
+from jinja2 import Environment
 from pydantic import BaseModel, ConfigDict, Field
 from transformers import AutoTokenizer
 
-from trice.core.prompting import Labels
-from trice.experiment import Experiment
 from trice.llm import Endpoint
-from trice.schema import Condition, Run
-from trice.settings import Format
+from trice.runner import Runner
+from trice.schema import Condition, FormatName, Run
 
 
 class TokenCounter(BaseModel):
@@ -28,46 +27,50 @@ class TokenCounter(BaseModel):
     texts: dict[str, int] = Field(default_factory=dict)
     overheads: dict[tuple[str, ...], int] = Field(default_factory=dict)
 
-    def text(self, text: str) -> int:
+    def count_text(self, text: str) -> int:
         if text not in self.texts:
             self.texts[text] = len(self.tokenizer.encode(text, add_special_tokens=False))
         return self.texts[text]
 
-    def exact(self, messages: list[dict]) -> int:
+    def count_exact(self, messages: list[dict]) -> int:
         return len(
             self.tokenizer.apply_chat_template(
                 messages, tokenize=True, add_generation_prompt=True, return_dict=False, enable_thinking=False
             )
         )
 
-    def messages(self, messages: list[dict]) -> int:
+    def count_messages(self, messages: list[dict]) -> int:
         roles = tuple(m["role"] for m in messages)
         if roles not in self.overheads:
-            self.overheads[roles] = self.exact([{"role": r, "content": ""} for r in roles])
-        return self.overheads[roles] + sum(self.text(m["content"]) for m in messages)
+            self.overheads[roles] = self.count_exact([{"role": r, "content": ""} for r in roles])
+        return self.overheads[roles] + sum(self.count_text(m["content"]) for m in messages)
 
 
 class Budget(BaseModel):
-    experiment: Experiment
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    runner: Runner
+    env: Environment
     endpoints: dict[str, Endpoint]
     counters: dict[str, TokenCounter] = Field(default_factory=dict)
 
-    def counter(self, model: str) -> TokenCounter:
+    def load_counter(self, model: str) -> TokenCounter:
         if model not in self.counters:
-            spec, endpoint = self.experiment.settings.models[model], self.endpoints.get(model)
+            spec, endpoint = self.runner.config.models[model], self.endpoints.get(model)
             revision = endpoint.hf_revision if endpoint else None
             self.counters[model] = TokenCounter(
                 tokenizer=AutoTokenizer.from_pretrained(spec.hf_repo, revision=revision)
             )
         return self.counters[model]
 
-    def proxy(self, run: Run) -> Run:
+    def derive_proxy(self, run: Run) -> Run:
         """A retrieval condition without stored rankings yet (e.g. the API-backed large stack) is
         priced with small/full, else random demonstrations: same k and format, same length."""
         if Condition.parse(run.condition).kind != "retrieval":
             return run
         for candidate in (run.condition, "small/full"):
-            if self.experiment.rankings_path(Condition.parse(candidate).stack, run.dataset, run.queries).exists():
+            stack = Condition.parse(candidate).stack
+            if (self.runner.config.layout.rankings / stack / run.dataset / run.queries).exists():
                 return run.model_copy(update={"condition": candidate})
         return run.model_copy(update={"condition": "random:0"})
 
@@ -75,31 +78,31 @@ class Budget(BaseModel):
         self,
         studies: list[str],
         assume_k: int | None = None,
-        assume_format: Format | None = None,
+        assume_format: FormatName | None = None,
         models: list[str] | None = None,
         datasets: list[str] | None = None,
         checks: int = 200,
     ) -> dict:
         """Tokens and cost per study. Identical requests are counted once (the replay cache serves
         repeats), and prompts are built once per (dataset, queries, condition, format, k)."""
-        settings = self.experiment.settings.stats
+        stats = self.runner.config.stats
         groups: dict[tuple, list[tuple[str, Run]]] = defaultdict(list)
         for study in studies:
-            for run in self.experiment.plan(study, assume_k, assume_format, models, datasets):
+            for run in self.runner.expand_plan(study, assume_k, assume_format, models, datasets):
                 groups[(run.dataset, run.queries, run.condition, run.fmt, run.k)].append((study, run))
         seen: set[str] = set()
         totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         sample, rnd, calls, proxies = [], random.Random(0), 0, set()
         for members in groups.values():
             first = members[0][1]
-            priced = self.proxy(first)
+            priced = self.derive_proxy(first)
             if priced.condition != first.condition:
                 proxies.add(f"{first.condition}->{priced.condition}")
-            labels = Labels(raw_to_verbal=self.experiment.corpus.labels(first.dataset))
-            pairs = self.experiment.prompts(priced)
+            labels = self.runner.corpus.load_labels(first.dataset)
+            pairs = self.runner.render_prompts(priced)
             for study, run in members:
                 counter, endpoint = (
-                    self.counter(run.model),
+                    self.load_counter(run.model),
                     self.endpoints.get(run.model, Endpoint(backend="local", model=run.model)),
                 )
                 for query, prompt in pairs:
@@ -109,11 +112,9 @@ class Budget(BaseModel):
                     if key in seen:
                         continue
                     seen.add(key)
-                    n_in = counter.messages(prompt.messages)
-                    n_out = round(
-                        counter.text(self.experiment.prompter.answer(run.fmt, query, labels)) * settings.output_factor
-                        + settings.output_extra
-                    )
+                    n_in = counter.count_messages(prompt.messages)
+                    answer = self.runner.formats[run.fmt].render_answer(labels, query)
+                    n_out = round(counter.count_text(answer) * stats.output_factor + stats.output_extra)
                     row = totals[study]
                     row["calls"] += 1
                     row["input_tokens"] += n_in
@@ -125,7 +126,8 @@ class Budget(BaseModel):
                     elif (j := rnd.randrange(calls)) < checks:
                         sample[j] = (run.model, prompt.messages)
         errors = [
-            abs(self.counter(m).messages(msgs) - self.counter(m).exact(msgs)) / self.counter(m).exact(msgs)
+            abs(self.load_counter(m).count_messages(msgs) - self.load_counter(m).count_exact(msgs))
+            / self.load_counter(m).count_exact(msgs)
             for m, msgs in sample
         ]
         rows = [{"study": s, **{k: int(v) if k != "cost" else v for k, v in t.items()}} for s, t in totals.items()]
@@ -142,4 +144,4 @@ class Budget(BaseModel):
         }
 
     def render(self, payload: dict, contingency: float = 1.5) -> str:
-        return self.experiment.prompter.env.get_template("budget.md.j2").render(contingency=contingency, **payload)
+        return self.env.get_template("budget.md.j2").render(contingency=contingency, **payload)

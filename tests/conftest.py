@@ -1,18 +1,23 @@
+from collections.abc import Iterator
+
 import pytest
 
-from trice.container import Container
-from trice.core.prompting import Labels
-from trice.schema import Example
+from trice.compose import App, compose
+from trice.config import Config
+from trice.schema import Example, LabelMap
 
 
 @pytest.fixture(scope="session")
-def container() -> Container:
-    return Container()
+def app(tmp_path_factory: pytest.TempPathFactory) -> Iterator[App]:
+    base = Config()
+    layout = base.layout.model_copy(update={"cache": tmp_path_factory.mktemp("cache")})
+    with compose(base.model_copy(update={"layout": layout})) as composed:
+        yield composed
 
 
 @pytest.fixture
-def labels() -> Labels:
-    return Labels(raw_to_verbal={"PER": "person", "LOC": "location", "programlang": "programming language"})
+def labels() -> LabelMap:
+    return LabelMap({"PER": "person", "LOC": "location", "programlang": "programming language"})
 
 
 def example(i: int, tokens: list[str], tags: list[str] | None = None) -> Example:

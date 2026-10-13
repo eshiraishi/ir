@@ -17,57 +17,62 @@ from pydantic import BaseModel, ConfigDict
 from sentence_transformers import SentenceTransformer, SparseEncoder
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from trice.core.retrieval import Reranker, Scorer
+from trice.schema import ModelRef, Runtime
 
 
-class LocalModel(Scorer):
-    """Shared settings of local models: pinned revision, device, fixed threads and batch size."""
-
-    model_id: str
-    revision: str | None = None
-    device: str = "cpu"
-    threads: int = 8
-    batch_size: int = 32
-
-    def deterministic(self) -> None:
-        torch.use_deterministic_algorithms(True)
-        torch.set_num_threads(self.threads)
+def fix_determinism(runtime: Runtime) -> None:
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(runtime.threads)
 
 
-class SparseScorer(LocalModel):
+class SparseScorer(BaseModel):
     """Learned sparse retrieval (OpenSearch v3 / SPLADE family)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    ref: ModelRef
+    runtime: Runtime
 
     @cached_property
     def model(self) -> SparseEncoder:
-        self.deterministic()
-        return SparseEncoder(self.model_id, revision=self.revision, device=self.device)
+        fix_determinism(self.runtime)
+        return SparseEncoder(self.ref.id, revision=self.ref.revision, device=self.runtime.device)
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
-        q = self.model.encode_query(queries, batch_size=self.batch_size, save_to_cpu=True)
-        d = self.model.encode_document(pool, batch_size=self.batch_size, save_to_cpu=True)
+        size = self.runtime.batch_size
+        q = self.model.encode_query(queries, batch_size=size, save_to_cpu=True)
+        d = self.model.encode_document(pool, batch_size=size, save_to_cpu=True)
         return self.model.similarity(q, d).to_dense().float().numpy()
 
 
-class DenseScorer(LocalModel):
+class DenseScorer(BaseModel):
     """Bi-encoder, symmetric (no instruction) unless ``query_prompt`` is set (v1 replica)."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    ref: ModelRef
+    runtime: Runtime
     query_prompt: str | None = None
 
     @cached_property
     def model(self) -> SentenceTransformer:
-        self.deterministic()
-        return SentenceTransformer(self.model_id, revision=self.revision, device=self.device)
+        fix_determinism(self.runtime)
+        return SentenceTransformer(self.ref.id, revision=self.ref.revision, device=self.runtime.device)
 
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         def embed(texts: list[str], prompt: str | None) -> np.ndarray:
-            return self.model.encode(texts, prompt=prompt, batch_size=self.batch_size, normalize_embeddings=True)
+            return self.model.encode(
+                texts, prompt=prompt, batch_size=self.runtime.batch_size, normalize_embeddings=True
+            )
 
         return embed(queries, self.query_prompt) @ embed(pool, None).T
 
 
-class BM25Scorer(Scorer):
+class BM25Scorer(BaseModel):
     """v1 replica: Okapi BM25 over spaCy lookup-lemmatized lowercase tokens (bm25s' Robertson
     variant drops the constant (k1 + 1) factor; rankings are identical)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     k1: float
     b: float
@@ -88,27 +93,28 @@ class BM25Scorer(Scorer):
         return np.stack([index.get_scores(tokens(q)) for q in queries])
 
 
-class QwenReranker(Reranker):
+class QwenReranker(BaseModel):
     """Qwen3-Reranker scored as on its model card: P("yes") from the next-token logits of an
     instruction-formatted (query, document) pair."""
 
-    model_id: str
-    revision: str | None = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    ref: ModelRef
+    runtime: Runtime
     instruction: str
     env: Environment
-    device: str = "cpu"
     batch_size: int = 16
 
     @cached_property
     def tokenizer(self) -> PreTrainedTokenizerBase:
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id, revision=self.revision, padding_side="left")
+        tokenizer = AutoTokenizer.from_pretrained(self.ref.id, revision=self.ref.revision, padding_side="left")
         return cast(PreTrainedTokenizerBase, tokenizer)
 
     @cached_property
     def model(self) -> PreTrainedModel:
-        torch.use_deterministic_algorithms(True)
+        fix_determinism(self.runtime)
         return AutoModelForCausalLM.from_pretrained(
-            self.model_id, revision=self.revision, dtype=torch.float32, device_map=self.device
+            self.ref.id, revision=self.ref.revision, dtype=torch.float32, device_map=self.runtime.device
         ).eval()
 
     def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
@@ -129,7 +135,9 @@ class QwenReranker(Reranker):
         yes, no = self.tokenizer.convert_tokens_to_ids("yes"), self.tokenizer.convert_tokens_to_ids("no")
         scores = []
         for i in range(0, len(texts), self.batch_size):
-            batch = self.tokenizer(texts[i : i + self.batch_size], padding=True, return_tensors="pt").to(self.device)
+            batch = self.tokenizer(texts[i : i + self.batch_size], padding=True, return_tensors="pt").to(
+                self.runtime.device
+            )
             with torch.no_grad():
                 logits = self.model(**batch).logits[:, -1, [no, yes]]
             scores.append(torch.log_softmax(logits, dim=1)[:, 1].exp().numpy())
@@ -151,7 +159,9 @@ class ApiClient(BaseModel):
         return cast(dict, self.cache[key])
 
 
-class ApiScorer(Scorer):
+class ApiScorer(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     api: ApiClient
     model_id: str
     batch_size: int = 128
@@ -170,8 +180,10 @@ class ApiScorer(Scorer):
         return embed(queries) @ embed(pool).T
 
 
-class ApiReranker(Reranker):
+class ApiReranker(BaseModel):
     """Cohere-style /rerank (OpenRouter); whether the instruction can be set is checked at M4."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     api: ApiClient
     model_id: str

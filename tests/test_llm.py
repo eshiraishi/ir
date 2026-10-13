@@ -1,7 +1,7 @@
 import pytest
 from diskcache import Cache
 from openai import OpenAI
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from trice.llm import LLM, Endpoint, Pinner
 from trice.schema import Prompt
@@ -12,7 +12,7 @@ PINNED = Endpoint(
 )
 
 
-class Recording(LLM):
+class Recording(BaseModel):
     """Answers locally and records what would have been sent."""
 
     sent: list[dict] = Field(default_factory=list)
@@ -27,21 +27,22 @@ class Recording(LLM):
 
 
 @pytest.fixture
-def llm(container, tmp_path):
-    def make(mode: str = "readwrite", endpoint: Endpoint = PINNED) -> Recording:
-        return Recording(
-            endpoint=endpoint,
-            client=OpenAI(base_url="http://unused", api_key="x"),
-            cache=Cache(tmp_path / "cache"),
-            settings=container.settings.llm,
-            mode=mode,
+def transport() -> Recording:
+    return Recording()
+
+
+@pytest.fixture
+def llm(app, tmp_path, transport):
+    def make(mode: str = "readwrite", endpoint: Endpoint = PINNED) -> LLM:
+        return LLM(
+            endpoint=endpoint, transport=transport, cache=Cache(tmp_path / "cache"), config=app.config.llm, mode=mode
         )
 
     return make
 
 
 def test_openrouter_request_pins_routing_and_disables_thinking(llm):
-    request = llm().request(PROMPT)
+    request = llm().render_request(PROMPT)
     assert request["extra_body"] == {
         "provider": {
             "order": ["DeepInfra"],
@@ -52,26 +53,26 @@ def test_openrouter_request_pins_routing_and_disables_thinking(llm):
         "reasoning": {"enabled": False},
     }
     assert (request["temperature"], request["seed"], request["stop"]) == (0.0, 0, ["\nX"])
-    local = llm(endpoint=Endpoint(backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True)).request(PROMPT)
+    local = llm(endpoint=Endpoint(backend="local", model="Qwen/Qwen3.5-0.8B", thinking=True)).render_request(PROMPT)
     assert local["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
-def test_record_replay_and_audit(llm):
+def test_record_replay_and_audit(llm, transport):
     writer = llm()
     first = writer.complete(PROMPT)
-    assert writer.complete(PROMPT) == first and len(writer.sent) == 1
+    assert writer.complete(PROMPT) == first and len(transport.sent) == 1
     assert llm("replay").complete(PROMPT) == first
     with pytest.raises(LookupError):
         llm("replay").complete(PROMPT.model_copy(update={"stop": None}))
     audit = llm("bypass")
     audit.complete(PROMPT, audit_tag="day1")
-    assert len(audit.sent) == 1  # always a live call, stored under the audit tag only
-    assert writer.complete(PROMPT) == first and len(writer.sent) == 1
+    assert len(transport.sent) == 2  # always a live call, stored under the audit tag only
+    assert writer.complete(PROMPT) == first and len(transport.sent) == 2
 
 
-def test_pinner_prefers_precision_then_price(container):
-    pinner = Pinner(client=OpenAI(base_url="http://unused", api_key="x"), settings=container.settings.llm)
-    params = [*container.settings.llm.required_parameters, "reasoning"]
+def test_pinner_prefers_precision_then_price(app):
+    pinner = Pinner(client=OpenAI(base_url="http://unused", api_key="x"), config=app.config.llm)
+    params = [*app.config.llm.required_parameters, "reasoning"]
 
     def endpoint(name: str, quant: str, price: float, supported: list[str] = params) -> dict:
         return {
@@ -81,8 +82,8 @@ def test_pinner_prefers_precision_then_price(container):
             "supported_parameters": supported,
         }
 
-    choice = pinner.choose(
+    choice = pinner.choose_endpoint(
         [endpoint("Cheap", "fp8", 1e-8), endpoint("A", "bf16", 5e-8), endpoint("B", "bf16", 3e-8)], thinking=True
     )
     assert choice["provider_name"] == "B"
-    assert pinner.choose([endpoint("NoSchema", "bf16", 1e-9, ["temperature"])], thinking=False) is None
+    assert pinner.choose_endpoint([endpoint("NoSchema", "bf16", 1e-9, ["temperature"])], thinking=False) is None

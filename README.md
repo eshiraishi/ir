@@ -17,16 +17,20 @@ The pre-registered design is in `docs/preregistration.md`.
 ## Design
 
 - **One config:** `trice.toml` holds every setting (datasets with pinned commits and SHA-256,
-  models, retrieval stacks, studies, sampling, statistics, paths). Secrets go in `.env`
-  (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are parsed by `trice.settings.Settings`
-  (pydantic-settings).
-- **Composition root:** `trice.container.Container` is the only place that reads `Settings`. It
-  builds and wires every component; the CLI and the tests ask it for components.
+  models, retrieval stacks, studies, sampling, statistics, and the `[layout]` of every file the
+  pipeline reads or writes). Secrets go in `.env` (`OPENROUTER_API_KEY`, `HF_TOKEN`). Both are
+  parsed by `trice.config.Config` (pydantic-settings); nothing derives settings with functions.
+- **Composition root:** `trice.compose.compose` is one explicit function that builds and wires
+  every component and returns them as an `App`; it is a context manager that closes the cache and
+  clients. The CLI and the tests use it, and a test replaces the network by passing a `transport`.
+- **Protocols, not base classes:** `Scorer`, `Reranker`, `Format`, `Completer` and `Transport` are
+  `typing.Protocol`s; implementations are plain pydantic models that satisfy them.
 - **Modular:**
-  - `core/` is the ML (retrieval, prompting, train-only selection), with no I/O, CLI or network.
-  - `evaluation/` is scoring, statistics and reports.
-  - `experiment.py` runs studies.
-  - `analysis.py` writes the pre-registered tables and figures.
+  - `core/` is the ML (retrieval, the four prompt formats, train-only selection), with no I/O,
+    CLI or network.
+  - `evaluation/` is scoring, statistics (`Inferrer`) and reports (`Reporter`).
+  - `runner.py` runs studies.
+  - `analyzer.py` writes the pre-registered tables and figures.
 - **Libraries over own code:**
 
   | Job | Library |
@@ -45,9 +49,9 @@ The pre-registered design is in `docs/preregistration.md`.
 ```
 trice.toml                 the configuration
 src/trice/
-  settings.py  schema.py  data.py  llm.py  experiment.py  analysis.py  budget.py  container.py  cli.py
-  core/        retrieval.py  encoders.py  prompting.py  selection.py
-  evaluation/  scoring.py  stats.py  report.py
+  config.py  schema.py  data.py  llm.py  runner.py  analyzer.py  budget.py  compose.py  cli.py
+  core/        retrieval.py  encoders.py  formats.py  selection.py
+  evaluation/  scoring.py  inference.py  report.py
   templates/   prompts (p0, system, answer, probe, reranker) and reports (tables, budget)
 envs/serve/      separate uv project: vLLM for model sizes OpenRouter does not serve
 envs/baselines/  separate uv project: GLiNER / GLiNER2 / NuNER-Zero baselines

@@ -39,15 +39,15 @@ class Trend(BaseModel):
     p_two_sided: float  # Bonferroni x2
 
 
-class Stats(BaseModel):
+class Inferrer(BaseModel):
     resamples: int
     alpha: float
 
-    def compare(self, a: np.ndarray, b: np.ndarray, *seed: object) -> Comparison:
+    def compare_pair(self, a: np.ndarray, b: np.ndarray, *seed: object) -> Comparison:
         n, stacked = len(a), np.vstack([a, b])
 
         def delta(x: np.ndarray, y: np.ndarray, axis: int = -1) -> np.ndarray:
-            return Evaluator.f1(stacked[x].sum(axis=-2)) - Evaluator.f1(stacked[y].sum(axis=-2))
+            return Evaluator.compute_f1(stacked[x].sum(axis=-2)) - Evaluator.compute_f1(stacked[y].sum(axis=-2))
 
         x, y = np.arange(n), np.arange(n, 2 * n)
         test = stats.permutation_test(
@@ -82,12 +82,12 @@ class Stats(BaseModel):
             mcnemar_p=float(mcnemar(table, exact=True).pvalue),
         )
 
-    def standard_error(self, counts: np.ndarray, *seed: object) -> float:
+    def bootstrap_error(self, counts: np.ndarray, *seed: object) -> float:
         """Bootstrap SE of one system's micro-F1 (for the 1-SE robustness rule)."""
         return float(
             stats.bootstrap(
                 (np.arange(len(counts)),),
-                lambda i, axis=-1: Evaluator.f1(counts[i].sum(axis=-2)),
+                lambda i, axis=-1: Evaluator.compute_f1(counts[i].sum(axis=-2)),
                 vectorized=True,
                 method="percentile",
                 n_resamples=self.resamples,
@@ -96,15 +96,15 @@ class Stats(BaseModel):
         )
 
     @staticmethod
-    def holm(p_values: list[float]) -> list[float]:
+    def correct_holm(p_values: list[float]) -> list[float]:
         return multipletests(p_values, method="holm")[1].tolist() if p_values else []
 
     @staticmethod
-    def wilcoxon(deltas: list[float]) -> float:
+    def test_wilcoxon(deltas: list[float]) -> float:
         return 1.0 if not any(deltas) else float(stats.wilcoxon(deltas).pvalue)
 
     @staticmethod
-    def friedman(scores: pd.DataFrame) -> Friedman:
+    def test_friedman(scores: pd.DataFrame) -> Friedman:
         """``scores``: rows = blocks (dataset x model), columns = treatments, higher is better."""
         result = stats.friedmanchisquare(*scores.T.to_numpy())
         return Friedman(
@@ -115,7 +115,7 @@ class Stats(BaseModel):
         )
 
     @staticmethod
-    def page(data: np.ndarray) -> Trend:
+    def test_trend(data: np.ndarray) -> Trend:
         """Page's L; ``data`` is (blocks, treatments) with treatments in increasing size."""
         up, down = stats.page_trend_test(data).pvalue, stats.page_trend_test(data[:, ::-1]).pvalue
         return Trend(p_increasing=up, p_decreasing=down, p_two_sided=min(1.0, 2 * min(up, down)))

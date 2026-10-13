@@ -1,7 +1,8 @@
-"""End to end through the container, offline: S0 format choice -> LOO curves -> k* -> S1 ->
+"""End to end through compose(), offline: S0 format choice -> LOO curves -> k* -> S1 ->
 tables and TikZ figures -> byte-identical replay -> budget. The LLM is an oracle that answers
 correctly only when given at least two demonstrations, so k* has a known knee."""
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -11,11 +12,11 @@ import tomli_w
 from datasets import Dataset, DatasetDict
 
 from trice.budget import TokenCounter
-from trice.container import Container
-from trice.core.prompting import Labels, Prompter
-from trice.core.retrieval import Reranker, Retriever, Scorer
-from trice.llm import LLM, Endpoint, Mode
-from trice.schema import Example
+from trice.compose import compose
+from trice.config import Config
+from trice.core.formats import Format
+from trice.core.retrieval import Retriever
+from trice.schema import Example, FormatName, LabelMap
 
 NAMES = ["Alice", "Bruno", "Carla", "Diego", "Elena", "Fabio", "Gina", "Hugo", "Iris", "Joao"]
 CITIES = ["Paris", "Lima", "Oslo", "Quito", "Rome", "Seoul", "Tokyo", "Accra"]
@@ -34,19 +35,22 @@ def sentences(name: str, split: str, n: int, offset: int) -> list[Example]:
     return out
 
 
-class Overlap(Scorer):
+class Overlap:
     def score(self, queries: list[str], pool: list[str]) -> np.ndarray:
         return np.array([[len(set(q.split()) & set(p.split())) for p in pool] for q in queries], float)
 
 
-class OverlapReranker(Reranker):
+class OverlapReranker:
     def score_pairs(self, query: str, docs: list[str]) -> np.ndarray:
         return Overlap().score([query], docs)[0]
 
 
-class Oracle(LLM):
-    prompter: Prompter
-    gold: dict[str, Example]
+class Oracle:
+    """Plays the network: answers correctly only when given at least two demonstrations."""
+
+    def __init__(self) -> None:
+        self.formats: dict[FormatName, Format] = {}
+        self.gold: dict[str, Example] = {}
 
     def send(self, request: dict) -> dict:
         messages = request["messages"]
@@ -60,29 +64,8 @@ class Oracle(LLM):
             query = content.rsplit("\nExample ", 1)[1].split(": ", 1)[1].removesuffix("\nAnswer:")
         example = self.gold[query]
         shown = example if demos >= 2 else example.model_copy(update={"tags": ["O"] * len(example.tokens)})
-        text = self.prompter.answer(fmt, shown, Labels(raw_to_verbal=LABELS))
+        text = self.formats[fmt].render_answer(LabelMap(LABELS), shown)
         return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}], "provider": "P"}
-
-
-class OfflineContainer(Container):
-    def llm(self, model: str, mode: Mode = "readwrite") -> LLM:
-        gold = {
-            e.text: e
-            for name in ("toy_a", "toy_b")
-            for split in ("train", "test")
-            for e in self.corpus.load(name, split)
-        }
-        return Oracle(
-            endpoint=Endpoint(
-                backend="openrouter", model=model, provider="P", prompt_price=1e-7, completion_price=2e-7
-            ),
-            client=self.openrouter,
-            cache=self.cache,
-            settings=self.settings.llm,
-            mode=mode,
-            prompter=self.experiment.prompter,
-            gold=gold,
-        )
 
 
 class WordTokenizer:
@@ -105,6 +88,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config["stats"]["resamples"] = 500
     (tmp_path / "trice.toml").write_text(tomli_w.dumps(config))
     monkeypatch.chdir(tmp_path)
+    endpoints = {"backend": "openrouter", "model": "x", "provider": "P", "prompt_price": 1e-7, "completion_price": 2e-7}
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "endpoints.json").write_text(json.dumps({m: endpoints for m in config["models"]}))
     for offset, name in enumerate(("toy_a", "toy_b")):
         splits = {"train": sentences(name, "train", 30, 10 * offset), "test": sentences(name, "test", 12, 100 + offset)}
         DatasetDict({s: Dataset.from_list([e.model_dump() for e in rows]) for s, rows in splits.items()}).save_to_disk(
@@ -114,7 +100,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_full_pipeline(project: Path) -> None:
-    c = OfflineContainer()
+    oracle = Oracle()
     retriever = Retriever(
         stages={"sparse": Overlap(), "dense": Overlap()},
         reranker=OverlapReranker(),
@@ -122,42 +108,65 @@ def test_full_pipeline(project: Path) -> None:
         rerank_depth=200,
         store_depth=200,
     )
-    for name in ("toy_a", "toy_b"):
-        for queries in ("test", "loo"):
-            c.experiment.rank("small", retriever, name, queries)
+    with compose(Config(), oracle) as app:
+        runner = app.runner
+        oracle.formats = app.formats
+        oracle.gold = {
+            e.text: e
+            for name in ("toy_a", "toy_b")
+            for split in ("train", "test")
+            for e in app.corpus.load(name, split)
+        }
+        for name in ("toy_a", "toy_b"):
+            for queries in ("test", "loo"):
+                runner.store_rankings("small", retriever, name, queries)
 
-    for run in c.experiment.plan("S0"):
-        c.experiment.execute(run, c.llm(run.model))
-    assert c.experiment.select_format() == "P0"  # every format is perfect; ties go to P0
+        for run in runner.expand_plan("S0"):
+            runner.execute(run, app.llms[run.model])
+        assert runner.select_format() == "P0"  # every format is perfect; ties go to P0
 
-    loo = c.experiment.plan("S1-loo")
-    assert {r.k for r in loo} == {0, 1, 2, 4, 8, 16}  # grid capped by the 30-sentence pool
-    for run in loo:
-        c.experiment.execute(run, c.llm(run.model))
-    assert c.experiment.select_k()["m1"]["toy_a"]["k_star"] == 2
+        loo = runner.expand_plan("S1-loo")
+        assert {r.k for r in loo} == {0, 1, 2, 4, 8, 16}  # grid capped by the 30-sentence pool
+        for run in loo:
+            runner.execute(run, app.llms[run.model])
+        assert runner.select_k()["m1"]["toy_a"]["k_star"] == 2
 
-    for run in c.experiment.plan("S1"):
-        c.experiment.execute(run, c.llm(run.model))
-    assert c.analysis.run() == ["S1", "S5"]
-    tables = project / "results" / "tables"
-    assert (tables / "S1.tex").exists() and "\\begin{tikzpicture}" in (tables / "S5-scaling.tex").read_text()
-    vs_zero = (tables / "S1-vs-zero_shot.json").read_text()
-    assert '"delta": 1.0' in vs_zero
+        for run in runner.expand_plan("S1"):
+            runner.execute(run, app.llms[run.model])
+        assert app.analyzer.run_all() == ["S1", "S5"]
+        tables = project / "results" / "tables"
+        assert (tables / "S1.tex").exists() and "\\begin{tikzpicture}" in (tables / "S5-scaling.tex").read_text()
+        assert '"delta": 1.0' in (tables / "S1-vs-zero_shot.json").read_text()
 
-    runs = sorted((project / "results" / "runs").rglob("*.jsonl"))
-    before = [p.read_bytes() for p in runs]
-    for p in runs:
-        p.unlink()
-    replay = OfflineContainer()
-    for study in ("S0", "S1-loo", "S1"):
-        for run in replay.experiment.plan(study):
-            replay.experiment.execute(run, replay.llm(run.model, mode="replay"))
-    assert [p.read_bytes() for p in sorted((project / "results" / "runs").rglob("*.jsonl"))] == before
+        runs = sorted((project / "results" / "runs").rglob("*.jsonl"))
+        before = [p.read_bytes() for p in runs]
+        assert not list((project / "results" / "runs").rglob("*.partial"))
+        for p in runs:
+            p.unlink()
+        for study in ("S0", "S1-loo", "S1"):
+            for run in runner.expand_plan(study):
+                runner.execute(run, app.llms[run.model].model_copy(update={"mode": "replay"}))
+        assert [p.read_bytes() for p in sorted((project / "results" / "runs").rglob("*.jsonl"))] == before
 
-    budget = c.budget.model_copy(
-        update={"counters": {m: TokenCounter(tokenizer=WordTokenizer()) for m in c.settings.models}}
-    )
-    payload = budget.estimate(["S1"])
-    distinct = {(r.model, p.model_dump_json()) for r in c.experiment.plan("S1") for _, p in c.experiment.prompts(r)}
-    assert payload["total"]["calls"] == len(distinct) and payload["max_error"] == 0.0  # repeats are priced once
-    assert "| S1 |" in budget.render(payload)
+        budget = app.budget.model_copy(
+            update={"counters": {m: TokenCounter(tokenizer=WordTokenizer()) for m in app.config.models}}
+        )
+        payload = budget.estimate(["S1"])
+        distinct = {
+            (r.model, p.model_dump_json()) for r in runner.expand_plan("S1") for _, p in runner.render_prompts(r)
+        }
+        assert payload["total"]["calls"] == len(distinct) and payload["max_error"] == 0.0  # repeats are priced once
+        assert payload["total"]["cost"] > 0  # priced with the pinned endpoints
+        assert "| S1 |" in budget.render(payload)
+
+
+def test_failed_run_leaves_no_partial_result(project: Path) -> None:
+    class Failing:
+        def complete_many(self, prompts: list, audit_tag: str = "") -> list:
+            raise RuntimeError("network down")
+
+    with compose(Config(), Oracle()) as app:
+        run = app.runner.expand_plan("S0", assume_format="P0")[0].model_copy(update={"condition": "zero_shot", "k": 0})
+        with pytest.raises(RuntimeError):
+            app.runner.execute(run, Failing())
+        assert not list((project / "results" / "runs").rglob("*.jsonl"))

@@ -1,10 +1,20 @@
-# TRICE configuration: the single source of truth, parsed by trice.settings.Settings.
+# TRICE configuration: the single source of truth, parsed by trice.config.Config.
 # Secrets (OPENROUTER_API_KEY, HF_TOKEN) live in .env, never here.
 
-[paths]
-data = "data"
-results = "results"
-cache = "cache"
+[layout]
+raw = "data/raw"
+canonical = "data/canonical"
+rankings = "data/rankings"
+cache = "cache/responses"
+endpoints = "results/endpoints.json"
+frozen_format = "results/frozen_format.json"
+k_star = "results/k_star.json"
+runs = "results/runs"
+audit = "results/audit"
+contamination = "results/contamination"
+baselines = "results/baselines"
+budget = "results/budget"
+tables = "results/tables"
 
 [llm]
 openrouter_url = "https://openrouter.ai/api/v1"
@@ -25,10 +35,12 @@ required_parameters = ["temperature", "top_p", "seed", "max_tokens", "stop", "re
 rrf_k = 60            # Cormack et al. (2009); fixed, never tuned
 rerank_depth = 200    # fused candidates reranked; exhaustive for every CrossNER pool
 store_depth = 200     # candidates stored per query and stage
+reranker_instruction = "Given a sentence, retrieve sentences that mention similar kinds of named entities in a similar context."
+
+[retrieval.runtime]
 device = "cpu"
 threads = 8
 batch_size = 32
-reranker_instruction = "Given a sentence, retrieve sentences that mention similar kinds of named entities in a similar context."
 
 [retrieval.stacks.small]   # default: every model < 1B, Apache-2.0, CPU-feasible
 kind = "trice"
@@ -44,8 +56,8 @@ reranker = { id = "qwen/qwen3-reranker-8b", backend = "openrouter" }
 
 [retrieval.stacks.v1_bm25]  # v1 replica: Okapi BM25 + spaCy lookup lemmatization
 kind = "bm25"
-bm25_k1 = 1.2
-bm25_b = 0.75
+k1 = 1.2
+b = 0.75
 
 [retrieval.stacks.v1_dense] # v1 replica: bge-large with v1's query instruction
 kind = "dense"
